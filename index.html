@@ -1,0 +1,2102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Homealive · AI Sales Portal</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:sans-serif;background:#F5F1EB;color:#1A1714;font-size:13px}
+  ::-webkit-scrollbar{width:5px;height:5px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#C49A4A44;border-radius:10px}
+  @keyframes dp{0%,80%,100%{opacity:.15}40%{opacity:1}}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const API = "https://api.anthropic.com/v1/messages";
+const TEAM = ["Krish","Harsha","Ravi","Divya","Unassigned"];
+
+// ─── AUTH SYSTEM ──────────────────────────────────────────────────────────────
+const ROLE_LABELS = {admin:"Admin",manager:"Sales Manager",telecaller:"Telecaller",designer:"Designer",finance:"Finance"};
+const ROLE_ICONS  = {admin:"👑",manager:"📊",telecaller:"📞",designer:"✏️",finance:"💳"};
+const ROLE_COLORS = {admin:C=>C.red,manager:C=>C.pur,telecaller:C=>C.org,designer:C=>C.blu,finance:C=>C.grn};
+const ROLE_NAV = {
+  admin:    ["dashboard","leads","qualified","callqueue","brief","proposals","pipeline","chatbot","users"],
+  manager:  ["dashboard","leads","qualified","callqueue","pipeline","chatbot"],
+  telecaller:["dashboard","callqueue","leads","chatbot"],
+  designer: ["dashboard","brief","qualified"],
+  finance:  ["dashboard","finance"],
+};
+const DEFAULT_USERS = [
+  {id:1,name:"Krish", username:"krish", password:"krish123", role:"admin"},
+  {id:2,name:"Harsha",username:"harsha",password:"harsha123",role:"manager"},
+  {id:3,name:"Ravi",  username:"ravi",  password:"ravi123",  role:"telecaller"},
+  {id:4,name:"Divya", username:"divya", password:"divya123", role:"designer"},
+];
+// ─── FIREBASE CONFIG ──────────────────────────────────────────────────────────
+// 🔧 SETUP: Replace the values below with your Firebase project config.
+// Get them from: Firebase Console → Project Settings → Your Apps → Web App → Config
+const FIREBASE_CONFIG = {
+  apiKey:            "PASTE_YOUR_API_KEY_HERE",
+  authDomain:        "PASTE_YOUR_AUTH_DOMAIN_HERE",
+  projectId:         "PASTE_YOUR_PROJECT_ID_HERE",
+  storageBucket:     "PASTE_YOUR_STORAGE_BUCKET_HERE",
+  messagingSenderId: "PASTE_YOUR_MESSAGING_SENDER_ID_HERE",
+  appId:             "PASTE_YOUR_APP_ID_HERE"
+};
+const FB_CONFIGURED = !Object.values(FIREBASE_CONFIG).some(v=>v.startsWith("PASTE_"));
+let db, leadsCol, usersCol;
+if(FB_CONFIGURED){
+  firebase.initializeApp(FIREBASE_CONFIG);
+  db       = firebase.firestore();
+  leadsCol = db.collection("leads");
+  usersCol = db.collection("users");
+}
+
+// Session & API key remain local (per-browser login is intentional)
+function loadSession(){try{const s=localStorage.getItem("ha_session");return s?JSON.parse(s):null;}catch(e){return null;}}
+function saveSession(u){try{localStorage.setItem("ha_session",JSON.stringify(u));}catch(e){}}
+function clearSession(){try{localStorage.removeItem("ha_session");}catch(e){}}
+function loadApiKey(){try{return localStorage.getItem("ha_apikey")||"";}catch(e){return "";}}
+function saveApiKey(k){try{localStorage.setItem("ha_apikey",k);}catch(e){}}
+
+// Users: loaded from Firestore; seeded with defaults on first run
+async function loadUsersFromDB(){
+  const snap = await usersCol.get();
+  if(snap.empty){
+    const batch = db.batch();
+    DEFAULT_USERS.forEach(u => batch.set(usersCol.doc(String(u.id)), u));
+    await batch.commit();
+    return DEFAULT_USERS;
+  }
+  return snap.docs.map(d=>d.data());
+}
+function saveUsers(users){
+  if(!FB_CONFIGURED) return;
+  const batch = db.batch();
+  users.forEach(u => batch.set(usersCol.doc(String(u.id)), u));
+  batch.commit().catch(e=>console.error("saveUsers error:",e));
+}
+const C = {
+  bg:"#F5F1EB", sur:"#FDFAF6", deep:"#1A1714", mut:"#7A7068",
+  bdr:"#E4DDD4", gld:"#C49A4A", gldL:"#F5ECD8", gldD:"#9A7835",
+  grn:"#2A6049", grnL:"#D4EDE2", red:"#B83232", redL:"#FDECEA",
+  org:"#B85A1A", orgL:"#FDEBD0", blu:"#1A4A72", bluL:"#D4E8F5",
+  pur:"#5A2D80", purL:"#F0E8F8", yel:"#92780A", yelL:"#FEF9E7"
+};
+
+const makeLead = (o={}) => ({
+  id: Date.now()+Math.random(), name:"", phone:"", source:"Instagram",
+  location:"", projectType:"Full home design", budget:"20L - 50L",
+  timeline:"1-3 months", property:"Ready to start", notes:"",
+  assignedTo:"Unassigned", stage:"new", score:null, temperature:null,
+  scoreAnalysis:null, callScript:null, callOutcome:null, callInterest:null,
+  callNotes:"", callBy:"", callHistory:[], followUps:[], confirmed:false,
+  brief:null, proposal:null, createdAt:new Date().toLocaleDateString("en-IN"), ...o
+});
+
+const tempColor = t => t==="Hot"?{bg:C.redL,c:C.red}:t==="Warm"?{bg:C.yelL,c:C.yel}:{bg:C.bluL,c:C.blu};
+const scoreColor = s => s>=75?{bg:C.grnL,c:C.grn}:s>=50?{bg:C.yelL,c:C.yel}:{bg:C.bluL,c:C.blu};
+const stageInfo = s => ({
+  new:{label:"New",bg:C.purL,c:C.pur},
+  qualified:{label:"AI Qualified",bg:C.yelL,c:C.yel},
+  "call-pending":{label:"Call Pending",bg:C.orgL,c:C.org},
+  confirmed:{label:"Confirmed",bg:C.grnL,c:C.grn},
+  onboarding:{label:"Brief",bg:C.bluL,c:C.blu},
+  proposal:{label:"Proposal",bg:C.grnL,c:C.grn},
+  closed:{label:"Closed",bg:"#F0EDE8",c:C.mut},
+}[s]||{label:s,bg:C.purL,c:C.pur});
+
+function Bdg({t,children,sm}){
+  const sc=tempColor(t)||{bg:stageInfo(t)&&stageInfo(t).bg||C.purL,c:stageInfo(t)&&stageInfo(t).c||C.pur};
+  return React.createElement("span",{style:{background:sc.bg,color:sc.c,fontSize:sm?9:10,fontWeight:700,padding:sm?"1px 6px":"2px 8px",borderRadius:20,whiteSpace:"nowrap"}},children);
+}
+function ScorePill({score}){
+  const sc=scoreColor(score);
+  return React.createElement("span",{style:{background:sc.bg,color:sc.c,fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:20}},score);
+}
+function Spinner(){
+  return React.createElement("span",{style:{display:"flex",gap:3,alignItems:"center"}},
+    [0,1,2].map(i=>React.createElement("span",{key:i,style:{width:5,height:5,borderRadius:"50%",background:C.gld,animation:`dp 1.2s ${i*.2}s infinite ease-in-out`}}))
+  );
+}
+function Empty({icon,title,sub}){
+  return React.createElement("div",{style:{textAlign:"center",padding:"40px 20px",color:C.mut}},
+    React.createElement("div",{style:{fontSize:30,marginBottom:8}},icon),
+    React.createElement("div",{style:{fontSize:13,fontWeight:600,color:C.deep,marginBottom:4}},title),
+    React.createElement("div",{style:{fontSize:11}},sub)
+  );
+}
+function FG({label,children,full,style}){
+  return React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:3,gridColumn:full?"1/-1":undefined,...style}},
+    React.createElement("label",{style:{fontSize:10,fontWeight:600,color:C.mut,textTransform:"uppercase",letterSpacing:.5}},label),
+    children
+  );
+}
+const inp = {padding:"7px 10px",border:`1px solid ${C.bdr}`,borderRadius:7,fontFamily:"sans-serif",fontSize:12,background:C.bg,outline:"none",color:C.deep,width:"100%"};
+const selSt = {...inp,cursor:"pointer"};
+const ta = {...inp,resize:"vertical",minHeight:68};
+const B = (v,sm) => {
+  const base={display:"inline-flex",alignItems:"center",gap:5,padding:sm?"5px 10px":"8px 15px",borderRadius:7,border:"none",fontFamily:"sans-serif",fontSize:sm?11:12,fontWeight:600,cursor:"pointer"};
+  const variants={gold:{background:C.gld,color:"#fff"},deep:{background:C.deep,color:"#fff"},green:{background:C.grn,color:"#fff"},red:{background:C.red,color:"#fff"},orange:{background:C.org,color:"#fff"},outline:{background:"transparent",border:`1px solid ${C.bdr}`,color:C.deep},ghost:{background:"transparent",border:"none",color:C.mut},wa:{background:"#25D366",color:"#fff"}};
+  return {...base,...(variants[v]||{background:"transparent",border:`1px solid ${C.bdr}`,color:C.deep})};
+};
+
+async function callAI(prompt, sys, onChunk, apiKey) {
+  if(!apiKey) throw new Error("Please enter your Anthropic API key in the sidebar first.");
+  const headers = {
+    "Content-Type":"application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true"
+  };
+  const body = {model:"claude-sonnet-4-20250514",max_tokens:1000,stream:true,messages:[{role:"user",content:prompt}]};
+  if(sys) body.system=sys;
+  const res = await fetch(API, {method:"POST",headers,body:JSON.stringify(body)});
+  if(!res.ok){ const e=await res.json().catch(()=>({})); throw new Error(e&&e.error&&e.error.message||`Error ${res.status}`); }
+  const reader=res.body.getReader(); const dec=new TextDecoder(); let full="";
+  while(true){
+    const {done,value}=await reader.read(); if(done) break;
+    for(const ln of dec.decode(value).split("\n").filter(l=>l.startsWith("data: "))){
+      try{ const d=JSON.parse(ln.slice(6)); if(d.type==="content_block_delta"&&d.delta&&d.delta.text){full+=d.delta.text;onChunk(full);} }catch(e){}
+    }
+  }
+  return full;
+}
+
+const TODAY = new Date().toISOString().split("T")[0];
+
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+function LoginScreen({onLogin}){
+  const [users,setLUsr] = useState(DEFAULT_USERS);
+  useEffect(()=>{if(FB_CONFIGURED)loadUsersFromDB().then(u=>setLUsr(u));},[]);
+  const [username,setUsername] = useState("");
+  const [password,setPassword] = useState("");
+  const [showPw,setShowPw]     = useState(false);
+  const [err,setErr]           = useState("");
+
+  function doLogin(){
+    const u=users.find(x=>x.username===username.trim().toLowerCase()&&x.password===password);
+    if(!u){setErr("Invalid username or password");return;}
+    saveSession(u); onLogin(u);
+  }
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{width:380,background:C.sur,borderRadius:16,boxShadow:"0 20px 60px rgba(26,23,20,.12)",overflow:"hidden"}}>
+        <div style={{background:C.deep,padding:"28px 32px"}}>
+          <div style={{fontSize:24,color:"#fff",fontFamily:"Georgia,serif",letterSpacing:.3,marginBottom:4}}>Homealive</div>
+          <div style={{fontSize:10,color:"rgba(255,255,255,.4)",letterSpacing:1.6,textTransform:"uppercase"}}>AI Sales Portal</div>
+        </div>
+        <div style={{padding:"28px 32px"}}>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:20,color:C.deep}}>Sign in to your account</div>
+          <FG label="Username" style={{marginBottom:12}}>
+            <input style={inp} value={username} onChange={e=>{setUsername(e.target.value);setErr("");}} placeholder="e.g. krish" onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+          </FG>
+          <FG label="Password" style={{marginBottom:6}}>
+            <div style={{position:"relative"}}>
+              <input style={{...inp,paddingRight:40}} type={showPw?"text":"password"} value={password} onChange={e=>{setPassword(e.target.value);setErr("");}} placeholder="Password" onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+              <button onClick={()=>setShowPw(s=>!s)} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",fontSize:11,color:C.mut}}>{showPw?"Hide":"Show"}</button>
+            </div>
+          </FG>
+          {err&&<div style={{fontSize:11,color:C.red,fontWeight:600,marginBottom:10}}>{err}</div>}
+          <button style={{...B("deep"),width:"100%",justifyContent:"center",marginTop:14}} onClick={doLogin}>Sign In →</button>
+          <div style={{marginTop:18,padding:"12px 14px",background:C.bg,borderRadius:9,fontSize:10,color:C.mut}}>
+            <div style={{fontWeight:700,marginBottom:5}}>Default credentials:</div>
+            {DEFAULT_USERS.map(u=><div key={u.id} style={{marginBottom:2}}><span style={{color:C.deep,fontWeight:600}}>{u.username}</span> / {u.password} <span style={{color:C.mut}}>({ROLE_LABELS[u.role]})</span></div>)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function App(){
+  const [currentUser,setCurrentUser] = useState(()=>loadSession());
+  const [leads,setLeads]   = useState([]);
+  const [users,setUsers]   = useState(DEFAULT_USERS);
+  const [dbReady,setDbReady] = useState(false);
+  const [page,setPage]     = useState("dashboard");
+  const [modal,setModal]   = useState(null);
+  const [selId,setSelId]   = useState(null);
+  const [apiKey,setApiKey] = useState(()=>loadApiKey());
+  const [showKey,setShowKey] = useState(false);
+  const [form,setForm]     = useState({source:"Instagram",projectType:"Full home design",budget:"20L - 50L",timeline:"1-3 months",property:"Ready to start",assignedTo:"Unassigned"});
+  const [chip,setChip]     = useState("all");
+  const [fsearch,setFs]    = useState("");
+  const [fstage,setFst]    = useState("");
+  const [toast,setToast]   = useState(null);
+
+  // Persist leads & apiKey
+  useEffect(()=>{
+    if(!FB_CONFIGURED){ setDbReady(true); return; }
+    loadUsersFromDB().then(u=>setUsers(u)).catch(console.error);
+    const unsub = leadsCol.onSnapshot(
+      snap=>{ setLeads(snap.docs.map(d=>({...d.data(),id:d.id}))); setDbReady(true); },
+      err =>{ console.error("Leads sync:",err); setDbReady(true); }
+    );
+    return ()=>unsub();
+  },[]);
+  useEffect(()=>{ saveApiKey(apiKey); },[apiKey]);
+
+  if(!FB_CONFIGURED) return (
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{width:520,background:C.sur,borderRadius:16,boxShadow:"0 20px 60px rgba(26,23,20,.12)",overflow:"hidden"}}>
+        <div style={{background:C.deep,padding:"28px 32px"}}>
+          <div style={{fontSize:24,color:"#fff",fontFamily:"Georgia,serif",letterSpacing:.3,marginBottom:4}}>Homealive</div>
+          <div style={{fontSize:10,color:"rgba(255,255,255,.4)",letterSpacing:1.6,textTransform:"uppercase"}}>Firebase Setup Required</div>
+        </div>
+        <div style={{padding:"28px 32px"}}>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:12,color:C.deep}}>🔧 Connect Firebase for shared team data</div>
+          <div style={{fontSize:12,color:C.mut,lineHeight:1.8,marginBottom:16}}>
+            Open <code style={{background:C.bg,padding:"1px 5px",borderRadius:4,fontSize:11}}>index.html</code> in a text editor and replace the <code style={{background:C.bg,padding:"1px 5px",borderRadius:4,fontSize:11}}>FIREBASE_CONFIG</code> placeholders near the top of the file with your real Firebase project credentials.
+          </div>
+          <div style={{background:C.bg,borderRadius:10,padding:"14px 16px",fontSize:11,lineHeight:2,border:`1px solid ${C.bdr}`}}>
+            <div style={{fontWeight:700,marginBottom:6,fontSize:12}}>Steps to get your config:</div>
+            <div>1. Go to <strong>console.firebase.google.com</strong></div>
+            <div>2. Create a project (or use an existing one)</div>
+            <div>3. <strong>Project Settings → Your Apps → Add Web App</strong></div>
+            <div>4. Copy the <code style={{background:C.sur,padding:"1px 4px",borderRadius:3}}>firebaseConfig</code> object</div>
+            <div>5. Paste each value into <code style={{background:C.sur,padding:"1px 4px",borderRadius:3}}>FIREBASE_CONFIG</code> in this file</div>
+            <div>6. In Firestore, go to <strong>Rules</strong> and set read/write to <code style={{background:C.sur,padding:"1px 4px",borderRadius:3}}>true</code> for your team</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+  if(!currentUser) return <LoginScreen onLogin={u=>{setCurrentUser(u);setPage("dashboard");}}/>;
+  if(!dbReady) return (
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}>
+      <div style={{fontSize:24,color:C.deep,fontFamily:"Georgia,serif"}}>Homealive</div>
+      <Spinner/>
+      <div style={{fontSize:11,color:C.mut}}>Connecting to Firebase…</div>
+    </div>
+  );;
+
+  const role = currentUser.role;
+  const allowedPages = ROLE_NAV[role]||["dashboard"];
+
+  const getLead = () => leads.find(l=>l.id===selId);
+  const updLead = useCallback((id,p) => {
+    setLeads(prev=>prev.map(l=>l.id===id?{...l,...p}:l));
+    if(FB_CONFIGURED) leadsCol.doc(String(id)).update(p).catch(e=>console.error("updLead:",e));
+  },[]);
+  const showToast = (msg,type) => { setToast({msg,type:type||"ok"}); setTimeout(()=>setToast(null),3000); };
+
+  // Computed stats
+  const total        = leads.length;
+  const qualifiedL   = leads.filter(l=>l.score!==null);
+  const callPend     = leads.filter(l=>l.score!==null&&!l.confirmed&&l.callOutcome!=="notinterested").length;
+  const conf         = leads.filter(l=>l.confirmed).length;
+  const activeProj   = leads.filter(l=>l.projectJourney?.token?.received);
+  const quoteSent    = leads.filter(l=>l.projectJourney?.quotation?.sent).length;
+  const overduePayL  = leads.filter(l=>l.projectJourney?.payments?.some(p=>p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY));
+  const dueFollowups = leads.filter(l=>l.callbackDate&&l.callbackDate<=TODAY&&!l.confirmed&&l.callOutcome!=="notinterested");
+  const upcomingVisits= leads.filter(l=>{const d=l.projectJourney?.siteVisit?.scheduled;return d&&d>=TODAY&&!l.projectJourney?.siteVisit?.done;});
+
+  const filtered = leads.filter(l=>{
+    const q=fsearch.toLowerCase();
+    const mq=!q||l.name.toLowerCase().includes(q)||(l.location||"").toLowerCase().includes(q)||(l.assignedTo||"").toLowerCase().includes(q);
+    const ms=!fstage||l.stage===fstage;
+    if(chip==="hot")   return mq&&l.temperature==="Hot";
+    if(chip==="calls") return mq&&l.score!==null&&!l.confirmed&&l.callOutcome!=="notinterested";
+    if(chip==="conf")  return mq&&l.confirmed;
+    if(chip==="due")   return mq&&l.callbackDate&&l.callbackDate<=TODAY&&!l.confirmed;
+    return mq&&ms;
+  });
+
+  async function addLead(qualify){
+    if(!form.name||!form.name.trim()){alert("Enter client name");return;}
+    if(!form.phone||!form.phone.trim()){alert("Enter phone number");return;}
+    const {id:_unused,...leadData}=makeLead({...form,name:form.name.trim(),phone:form.phone.trim(),location:(form.location||"").trim(),notes:(form.notes||"").trim()});
+    setModal(null);
+    setForm({source:"Instagram",projectType:"Full home design",budget:"20L - 50L",timeline:"1-3 months",property:"Ready to start",assignedTo:"Unassigned"});
+    if(FB_CONFIGURED){
+      const ref = await leadsCol.add(leadData).catch(e=>{showToast("Failed to add lead","err");console.error(e);return null;});
+      if(!ref) return;
+      showToast("Added: "+leadData.name);
+      if(qualify){setSelId(ref.id);setTimeout(()=>setModal("detail"),60);}
+      else setPage("leads");
+    } else {
+      const lead={...leadData,id:Date.now()+Math.random()};
+      setLeads(p=>[...p,lead]);
+      showToast("Added: "+lead.name+" (local only — Firebase not configured)");
+      if(qualify){setSelId(lead.id);setTimeout(()=>setModal("detail"),60);}
+      else setPage("leads");
+    }
+  }
+  function editLead(){
+    const l=getLead(); if(!l)return;
+    updLead(l.id,{...form}); setModal(null); showToast("Lead updated");
+  }
+  function openEdit(id){
+    const l=leads.find(x=>x.id===id);
+    setForm({name:l.name,phone:l.phone,source:l.source,location:l.location,projectType:l.projectType,budget:l.budget,timeline:l.timeline,property:l.property,notes:l.notes,assignedTo:l.assignedTo||"Unassigned"});
+    setSelId(id); setModal("edit");
+  }
+  function logout(){ clearSession(); setCurrentUser(null); }
+
+  const nav=(id,filter)=>{
+    if(!allowedPages.includes(id)){showToast("Access restricted for your role","err");return;}
+    setPage(id); setModal(null); if(filter) setChip(filter);
+  };
+
+  const PAGE_TITLES={dashboard:"Dashboard",leads:"All Leads",qualified:"Qualified Leads",callqueue:"Call Queue",brief:"Design Brief",proposals:"Proposals",pipeline:"Pipeline",chatbot:"Chatbot",finance:"Finance",users:"User Management"};
+
+  // Role-based nav items
+  const allNavItems=[
+    {icon:"⬚",label:"Dashboard",id:"dashboard"},
+    {section:"Leads"},
+    {icon:"🎯",label:"All Leads",id:"leads",badge:total},
+    {icon:"✅",label:"Qualified Leads",id:"qualified",badge:qualifiedL.length},
+    {section:"Operations"},
+    {icon:"📞",label:"Call Queue",id:"callqueue",badge:callPend,red:true},
+    {icon:"📋",label:"Design Brief",id:"brief"},
+    {icon:"📄",label:"Proposals",id:"proposals"},
+    {section:"Finance"},
+    {icon:"💳",label:"Finance",id:"finance",badge:overduePayL.length,red:true},
+    {section:"Views"},
+    {icon:"⊞",label:"Pipeline",id:"pipeline"},
+    {icon:"💬",label:"Chatbot",id:"chatbot"},
+    {section:"Admin"},
+    {icon:"👥",label:"Users",id:"users"},
+  ];
+  const navItems=allNavItems.filter(item=>item.section||(allowedPages.includes(item.id)));
+
+  const dashProps={leads,total,qualifiedCount:qualifiedL.length,callPend,conf,activeProj:activeProj.length,quoteSent,overduePayL,dueFollowups,upcomingVisits,nav,openDetail:id=>{setSelId(id);setModal("detail");},openAdd:()=>{setForm({source:"Instagram",projectType:"Full home design",budget:"20L - 50L",timeline:"1-3 months",property:"Ready to start",assignedTo:"Unassigned"});setModal("add");},currentUser,role};
+
+  return (
+    <div style={{display:"flex",minHeight:"100vh",background:C.bg,color:C.deep}}>
+      {/* SIDEBAR */}
+      <aside style={{width:218,background:C.deep,display:"flex",flexDirection:"column",flexShrink:0,minHeight:"100vh",position:"sticky",top:0,height:"100vh",overflowY:"auto"}}>
+        <div style={{padding:"18px 16px 12px",borderBottom:"1px solid rgba(255,255,255,.07)"}}>
+          <div style={{fontSize:19,color:"#fff",fontFamily:"Georgia,serif",letterSpacing:.3}}>Homealive</div>
+          <div style={{fontSize:9,color:"rgba(255,255,255,.3)",letterSpacing:1.5,textTransform:"uppercase",marginTop:2}}>AI Sales Portal</div>
+        </div>
+        {/* User badge */}
+        <div style={{padding:"10px 14px",borderBottom:"1px solid rgba(255,255,255,.07)",display:"flex",alignItems:"center",gap:9}}>
+          <div style={{width:30,height:30,borderRadius:"50%",background:"rgba(196,154,74,.25)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{ROLE_ICONS[role]}</div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,color:"#fff",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentUser.name}</div>
+            <div style={{fontSize:9,color:"rgba(255,255,255,.4)",textTransform:"uppercase",letterSpacing:.8}}>{ROLE_LABELS[role]}</div>
+          </div>
+          <button onClick={logout} style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"rgba(255,255,255,.3)",padding:"2px 5px"}} title="Logout">↩</button>
+        </div>
+        <nav style={{padding:"8px 0",flex:1}}>
+          {navItems.map((item,i)=> item.section
+            ? <div key={i} style={{padding:"9px 16px 2px",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:"rgba(255,255,255,.22)",fontWeight:600}}>{item.section}</div>
+            : <div key={i} onClick={()=>nav(item.id)} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",cursor:"pointer",color:page===item.id?"#fff":"rgba(255,255,255,.48)",fontSize:12,borderLeft:page===item.id?`2px solid ${C.gld}`:"2px solid transparent",background:page===item.id?"rgba(196,154,74,.1)":"transparent",transition:"all .15s"}}>
+                <span style={{fontSize:13,width:16,flexShrink:0}}>{item.icon}</span>
+                <span style={{flex:1}}>{item.label}</span>
+                {item.badge>0&&<span style={{background:item.red?C.red:C.gld,color:"#fff",fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:10}}>{item.badge}</span>}
+              </div>
+          )}
+        </nav>
+        <div style={{padding:"10px 14px",borderTop:"1px solid rgba(255,255,255,.07)"}}>
+          <div style={{fontSize:9,color:"rgba(255,255,255,.3)",textTransform:"uppercase",letterSpacing:1.2,marginBottom:5,fontWeight:600}}>Anthropic API Key</div>
+          <div style={{display:"flex",gap:5}}>
+            <input value={apiKey} onChange={e=>setApiKey(e.target.value)} type={showKey?"text":"password"} placeholder="sk-ant-..." style={{flex:1,padding:"6px 9px",background:"rgba(255,255,255,.07)",border:`1px solid ${apiKey?"rgba(196,154,74,.6)":"rgba(255,255,255,.12)"}`,borderRadius:6,color:"#fff",fontFamily:"sans-serif",fontSize:11,outline:"none"}}/>
+            <button onClick={()=>setShowKey(s=>!s)} style={{background:"rgba(255,255,255,.07)",border:"1px solid rgba(255,255,255,.12)",borderRadius:6,color:"rgba(255,255,255,.5)",cursor:"pointer",padding:"0 7px",fontSize:11}}>{showKey?"H":"S"}</button>
+          </div>
+          {apiKey&&<div style={{fontSize:9,color:"#4CAF50",marginTop:4}}>✓ AI agents ready</div>}
+          {!apiKey&&<div style={{fontSize:9,color:C.red,marginTop:4,lineHeight:1.4}}>Add key to use AI</div>}
+        </div>
+      </aside>
+
+      {/* MAIN */}
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{background:C.sur,borderBottom:`1px solid ${C.bdr}`,padding:"0 22px",height:52,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:10,flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{fontSize:14,fontWeight:600}}>{PAGE_TITLES[page]||page}</div>
+            {dueFollowups.length>0&&<div onClick={()=>nav("callqueue")} style={{display:"flex",alignItems:"center",gap:5,background:C.redL,color:C.red,fontSize:10,fontWeight:700,padding:"3px 9px",borderRadius:20,cursor:"pointer",border:`1px solid ${C.red}44`}}>
+              🔔 {dueFollowups.length} follow-up{dueFollowups.length>1?"s":""} due
+            </div>}
+            {overduePayL.length>0&&<div onClick={()=>nav("finance")} style={{display:"flex",alignItems:"center",gap:5,background:C.redL,color:C.red,fontSize:10,fontWeight:700,padding:"3px 9px",borderRadius:20,cursor:"pointer",border:`1px solid ${C.red}44`}}>
+              💳 {overduePayL.length} payment{overduePayL.length>1?"s":""} overdue
+            </div>}
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            {allowedPages.includes("leads")&&<button style={B("outline",true)} onClick={()=>{setForm({source:"Instagram",projectType:"Full home design",budget:"20L - 50L",timeline:"1-3 months",property:"Ready to start",assignedTo:"Unassigned"});setModal("add");}}>+ Add Lead</button>}
+          </div>
+        </div>
+
+        <div style={{padding:22,flex:1,overflowY:"auto"}}>
+          {page==="dashboard"&&<Dashboard {...dashProps}/>}
+          {page==="leads"&&<Leads leads={filtered} fsearch={fsearch} setFs={setFs} fstage={fstage} setFst={setFst} chip={chip} setChip={setChip} openDetail={id=>{setSelId(id);setModal("detail");}} openEdit={openEdit}/>}
+          {page==="qualified"&&<QualifiedLeadsPage leads={qualifiedL} allLeads={leads} updLead={updLead} showToast={showToast} openLeadDetail={id=>{setSelId(id);setModal("detail");}}/>}
+          {page==="callqueue"&&<CallQueue leads={leads} openDetail={id=>{setSelId(id);setModal("detail");}}/>}
+          {page==="pipeline"&&<Pipeline leads={leads} openDetail={id=>{setSelId(id);setModal("detail");}}/>}
+          {page==="brief"&&<BriefPage leads={leads} openDetail={id=>{setSelId(id);setModal("detail");}}/>}
+          {page==="proposals"&&<ProposalsPage leads={leads} openDetail={id=>{setSelId(id);setModal("detail");}}/>}
+          {page==="chatbot"&&<Chatbot leads={leads} setLeads={setLeads} apiKey={apiKey} showToast={showToast}/>}
+          {page==="finance"&&<FinancePage leads={leads} updLead={updLead} showToast={showToast} openLeadDetail={id=>{setSelId(id);setModal("detail");}}/>}
+          {page==="users"&&role==="admin"&&<UsersPage users={users} setUsers={u=>{setUsers(u);saveUsers(u);}} showToast={showToast} currentUser={currentUser}/>}
+        </div>
+      </div>
+
+      {toast&&<div style={{position:"fixed",bottom:24,right:24,background:toast.type==="err"?C.red:C.grn,color:"#fff",padding:"10px 18px",borderRadius:9,fontSize:12,fontWeight:600,zIndex:999,boxShadow:"0 4px 20px rgba(0,0,0,.2)"}}>{toast.msg}</div>}
+      {modal==="add"&&<LeadFormModal title="Add new lead" sub="Phone required for call confirmation" form={form} setForm={setForm} onSave={()=>addLead(false)} onSaveQualify={()=>addLead(true)} onClose={()=>setModal(null)} isEdit={false}/>}
+      {modal==="edit"&&<LeadFormModal title="Edit lead" sub="Update lead details" form={form} setForm={setForm} onSave={editLead} onClose={()=>setModal(null)} isEdit={true}/>}
+      {modal==="detail"&&selId&&<LeadDetail lead={getLead()} updLead={updLead} onClose={()=>setModal(null)} apiKey={apiKey} showToast={showToast} onEdit={()=>openEdit(selId)}/>}
+    </div>
+  );
+}
+
+function LeadFormModal({title,sub,form,setForm,onSave,onSaveQualify,onClose,isEdit}){
+  const f=k=>e=>setForm(p=>({...p,[k]:e.target.value}));
+  return (
+    <Overlay onClose={onClose}>
+      <ModalBox w={680}>
+        <MHead title={title} sub={sub} onClose={onClose}/>
+        <div style={{padding:"18px 22px"}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11,marginBottom:14}}>
+            <FG label="Client name *"><input style={inp} value={form.name||""} onChange={f("name")} placeholder="Priya Sharma"/></FG>
+            <FG label="Phone *"><input style={inp} value={form.phone||""} onChange={f("phone")} placeholder="+91 98XXX XXXXX"/></FG>
+            <FG label="Lead source"><select style={selSt} value={form.source||"Instagram"} onChange={f("source")}><option>Instagram</option><option>Google Ads</option><option>Website</option><option>WhatsApp</option><option>Referral</option><option>Walk-in</option></select></FG>
+            <FG label="Location"><input style={inp} value={form.location||""} onChange={f("location")} placeholder="Whitefield, Bangalore"/></FG>
+            <FG label="Project type"><select style={selSt} value={form.projectType} onChange={f("projectType")}><option>Full home design</option><option>Living room only</option><option>Modular kitchen</option><option>Master bedroom</option><option>Office interior</option><option>Renovation</option></select></FG>
+            <FG label="Budget"><select style={selSt} value={form.budget} onChange={f("budget")}><option>Under 5L</option><option>5L - 10L</option><option>10L - 20L</option><option>20L - 50L</option><option>Above 50L</option></select></FG>
+            <FG label="Timeline"><select style={selSt} value={form.timeline} onChange={f("timeline")}><option>Within 1 month</option><option>1-3 months</option><option>3-6 months</option><option>6+ months</option></select></FG>
+            <FG label="Property status"><select style={selSt} value={form.property} onChange={f("property")}><option>Ready to start</option><option>Under construction</option><option>Renovation</option><option>Not decided</option></select></FG>
+            <FG label="Assign to"><select style={selSt} value={form.assignedTo||"Unassigned"} onChange={f("assignedTo")}>{TEAM.map(t=><option key={t}>{t}</option>)}</select></FG>
+            <FG label="Notes" full><textarea style={ta} value={form.notes||""} onChange={f("notes")} placeholder="What did they say? Any requirements?"/></FG>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button style={B("deep")} onClick={onSave}>{isEdit?"Save Changes":"Add Lead"}</button>
+            {!isEdit&&<button style={B("gold")} onClick={onSaveQualify}>Add and Qualify Now</button>}
+            <button style={B("ghost")} onClick={onClose}>Cancel</button>
+          </div>
+        </div>
+      </ModalBox>
+    </Overlay>
+  );
+}
+
+// ─── SHARED DASHBOARD HELPERS ────────────────────────────────────────────────
+function StatCard({label,val,sub,color,onClick,alert}){
+  return (
+    <div onClick={onClick} style={{background:C.sur,border:`2px solid ${alert?color:C.bdr}`,borderRadius:12,padding:"14px 16px",cursor:onClick?"pointer":"default",position:"relative",overflow:"hidden"}} onMouseOver={e=>{if(onClick)e.currentTarget.style.borderColor=color;}} onMouseOut={e=>{e.currentTarget.style.borderColor=alert?color:C.bdr;}}>
+      {alert&&<div style={{position:"absolute",top:0,right:0,width:0,height:0,borderStyle:"solid",borderWidth:"0 22px 22px 0",borderColor:`transparent ${color} transparent transparent`}}/>}
+      <div style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:600,marginBottom:4}}>{label}</div>
+      <div style={{fontSize:26,fontWeight:300,fontFamily:"Georgia,serif",color,lineHeight:1}}>{val}</div>
+      {sub&&<div style={{fontSize:10,color:C.mut,marginTop:4}}>{sub}</div>}
+    </div>
+  );
+}
+
+function PipelineFunnel({leads,nav}){
+  const stages=[
+    {id:"leads",      label:"Total Leads",    count:leads.length,                                                    color:C.pur,  nav:"leads"},
+    {id:"qualified",  label:"Qualified",      count:leads.filter(l=>l.score!==null).length,                          color:C.gldD, nav:"qualified"},
+    {id:"visit",      label:"Site Visit",     count:leads.filter(l=>l.projectJourney?.siteVisit?.done).length,        color:C.blu,  nav:"qualified"},
+    {id:"quotation",  label:"Quotation Sent", count:leads.filter(l=>l.projectJourney?.quotation?.sent).length,        color:C.org,  nav:"qualified"},
+    {id:"confirmed",  label:"Order Confirmed",count:leads.filter(l=>l.projectJourney?.orderConfirmed?.done).length,   color:C.grn,  nav:"qualified"},
+    {id:"execution",  label:"In Execution",   count:leads.filter(l=>l.projectJourney?.executionPhase?.started).length,color:C.grn,  nav:"qualified"},
+  ];
+  const max=Math.max(1,...stages.map(s=>s.count));
+  return (
+    <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12,padding:"14px 18px"}}>
+      <div style={{fontSize:12,fontWeight:700,marginBottom:14}}>Sales Pipeline Funnel</div>
+      <div style={{display:"flex",flexDirection:"column",gap:7}}>
+        {stages.map((s,i)=>{
+          const pct=Math.max(8,Math.round(s.count/max*100));
+          const conv=i>0&&stages[i-1].count>0?Math.round(s.count/stages[i-1].count*100):null;
+          return (
+            <div key={s.id} onClick={()=>nav(s.nav)} style={{cursor:"pointer"}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,alignItems:"center"}}>
+                <span style={{fontSize:11,fontWeight:600,color:C.deep}}>{s.label}</span>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  {conv!==null&&<span style={{fontSize:9,color:conv>=50?C.grn:C.org,fontWeight:700}}>{conv}% conv</span>}
+                  <span style={{fontSize:12,fontWeight:700,color:s.color}}>{s.count}</span>
+                </div>
+              </div>
+              <div style={{height:22,background:C.bg,borderRadius:6,overflow:"hidden",border:`1px solid ${C.bdr}`}}>
+                <div style={{height:"100%",width:pct+"%",background:s.color,opacity:.8,borderRadius:6,minWidth:s.count>0?8:0,display:"flex",alignItems:"center",paddingLeft:6}}>
+                  {s.count>0&&<span style={{fontSize:9,color:"#fff",fontWeight:700}}>{s.count}</span>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TodayFollowUps({dueFollowups,nav}){
+  return (
+    <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:12,fontWeight:700}}>📞 Today's Follow-ups</span>
+        <span style={{fontSize:10,color:C.mut}}>{dueFollowups.length} due</span>
+      </div>
+      {dueFollowups.length===0
+        ?<div style={{padding:"16px",fontSize:11,color:C.mut,textAlign:"center"}}>All clear — no follow-ups due today 🎉</div>
+        :dueFollowups.slice(0,5).map(l=>(
+          <div key={l.id} onClick={()=>nav("callqueue")} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderBottom:`1px solid ${C.bdr}`,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.background=C.bg} onMouseOut={e=>e.currentTarget.style.background=""}>
+            <div style={{width:7,height:7,borderRadius:"50%",background:C.red,flexShrink:0}}/>
+            <div style={{flex:1}}>
+              <div style={{fontSize:12,fontWeight:600}}>{l.name}</div>
+              <div style={{fontSize:10,color:C.mut}}>{l.projectType} · {l.phone}</div>
+            </div>
+            <span style={{fontSize:10,color:C.red,fontWeight:700}}>Due</span>
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
+function UpcomingVisits({upcomingVisits,nav}){
+  return (
+    <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:12,fontWeight:700}}>🏠 Upcoming Site Visits</span>
+        <span style={{fontSize:10,color:C.mut}}>{upcomingVisits.length} scheduled</span>
+      </div>
+      {upcomingVisits.length===0
+        ?<div style={{padding:"16px",fontSize:11,color:C.mut,textAlign:"center"}}>No visits scheduled</div>
+        :upcomingVisits.slice(0,5).map(l=>(
+          <div key={l.id} onClick={()=>nav("qualified")} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderBottom:`1px solid ${C.bdr}`,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.background=C.bg} onMouseOut={e=>e.currentTarget.style.background=""}>
+            <div style={{width:7,height:7,borderRadius:"50%",background:C.blu,flexShrink:0}}/>
+            <div style={{flex:1}}>
+              <div style={{fontSize:12,fontWeight:600}}>{l.name}</div>
+              <div style={{fontSize:10,color:C.mut}}>{l.projectJourney?.siteVisit?.scheduled}</div>
+            </div>
+            <span style={{fontSize:10,background:C.bluL,color:C.blu,fontWeight:700,padding:"1px 7px",borderRadius:20}}>Scheduled</span>
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
+function OverduePayments({overduePayL,nav}){
+  return (
+    <div style={{background:C.sur,border:`1px solid ${overduePayL.length>0?C.red:C.bdr}`,borderRadius:12}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:12,fontWeight:700,color:overduePayL.length>0?C.red:C.deep}}>💳 Overdue Payments</span>
+        {overduePayL.length>0&&<span style={{fontSize:10,background:C.redL,color:C.red,fontWeight:700,padding:"2px 8px",borderRadius:20}}>{overduePayL.length} overdue</span>}
+      </div>
+      {overduePayL.length===0
+        ?<div style={{padding:"16px",fontSize:11,color:C.mut,textAlign:"center"}}>No overdue payments 🎉</div>
+        :overduePayL.slice(0,5).map(l=>{
+          const overduePays=(l.projectJourney?.payments||[]).filter(p=>p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY);
+          return (
+            <div key={l.id} onClick={()=>nav("finance")} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderBottom:`1px solid ${C.bdr}`,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.background=C.bg} onMouseOut={e=>e.currentTarget.style.background=""}>
+              <div style={{width:7,height:7,borderRadius:"50%",background:C.red,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:12,fontWeight:600}}>{l.name}</div>
+                <div style={{fontSize:10,color:C.red}}>{overduePays.map(p=>p.label).join(", ")}</div>
+              </div>
+              <span style={{fontSize:10,color:C.red,fontWeight:700}}>⚠️</span>
+            </div>
+          );
+        })
+      }
+    </div>
+  );
+}
+
+// ─── ROLE DASHBOARDS ──────────────────────────────────────────────────────────
+
+function Dashboard({leads,total,qualifiedCount,callPend,conf,activeProj,quoteSent,overduePayL,dueFollowups,upcomingVisits,nav,openDetail,openAdd,currentUser,role}){
+  // Admin / Manager full dashboard
+  if(role==="admin"||role==="manager"){
+    const totalRec=leads.reduce((s,l)=>{
+      return s+(l.projectJourney?.payments||[]).reduce((ps,p)=>ps+(parseFloat(p.receivedAmt)||0),0);
+    },0);
+    const totalPend=leads.reduce((s,l)=>{
+      return s+(l.projectJourney?.payments||[]).reduce((ps,p)=>ps+(p.status!=="paid"?(parseFloat(p.scheduledAmt)||0)-(parseFloat(p.receivedAmt)||0):0),0);
+    },0);
+    return (
+      <div>
+        {/* Alert bar */}
+        {(dueFollowups.length>0||overduePayL.length>0)&&(
+          <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
+            {dueFollowups.length>0&&<div style={{flex:1,background:C.redL,border:`1px solid ${C.red}44`,borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+              <span>🔔</span><div style={{flex:1}}><div style={{fontWeight:700,fontSize:12,color:C.red}}>{dueFollowups.length} follow-up{dueFollowups.length>1?"s":""} due today</div><div style={{fontSize:10,color:C.red,opacity:.8}}>{dueFollowups.slice(0,3).map(l=>l.name).join(", ")}</div></div>
+              <button style={B("red",true)} onClick={()=>nav("callqueue")}>View</button>
+            </div>}
+            {overduePayL.length>0&&<div style={{flex:1,background:C.redL,border:`1px solid ${C.red}44`,borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+              <span>💳</span><div style={{flex:1}}><div style={{fontWeight:700,fontSize:12,color:C.red}}>{overduePayL.length} payment{overduePayL.length>1?"s":""} overdue</div><div style={{fontSize:10,color:C.red,opacity:.8}}>{overduePayL.slice(0,3).map(l=>l.name).join(", ")}</div></div>
+              <button style={B("red",true)} onClick={()=>nav("finance")}>View</button>
+            </div>}
+          </div>
+        )}
+        {/* Stat cards */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:10,marginBottom:16}}>
+          <StatCard label="Total Leads"   val={total}          sub="All sources"       color={C.deep} onClick={()=>nav("leads")}/>
+          <StatCard label="Qualified"     val={qualifiedCount} sub="AI scored"         color={C.pur}  onClick={()=>nav("qualified")}/>
+          <StatCard label="Call Queue"    val={callPend}       sub="Needs call"        color={C.org}  onClick={()=>nav("callqueue")} alert={callPend>0}/>
+          <StatCard label="Site Visits"   val={upcomingVisits.length} sub="Scheduled"  color={C.blu}  onClick={()=>nav("qualified")}/>
+          <StatCard label="Quotations"    val={quoteSent}      sub="Sent to clients"   color={C.gldD} onClick={()=>nav("qualified")}/>
+          <StatCard label="Active Proj."  val={activeProj}     sub="Token received"    color={C.grn}  onClick={()=>nav("qualified")}/>
+        </div>
+        {/* Finance summary */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
+          <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12,padding:"14px 18px"}}>
+            <div style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:600,marginBottom:4}}>Revenue Received</div>
+            <div style={{fontSize:24,fontWeight:300,fontFamily:"Georgia,serif",color:C.grn}}>₹{totalRec.toFixed(1)}L</div>
+            <div style={{fontSize:10,color:C.mut,marginTop:2}}>Across all projects</div>
+          </div>
+          <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12,padding:"14px 18px"}}>
+            <div style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:600,marginBottom:4}}>Pending Collection</div>
+            <div style={{fontSize:24,fontWeight:300,fontFamily:"Georgia,serif",color:totalPend>0?C.org:C.grn}}>₹{totalPend.toFixed(1)}L</div>
+            <div style={{fontSize:10,color:C.mut,marginTop:2}}>Scheduled, not received</div>
+          </div>
+          <div style={{background:C.sur,border:`1px solid ${overduePayL.length>0?C.red:C.bdr}`,borderRadius:12,padding:"14px 18px",cursor:"pointer"}} onClick={()=>nav("finance")}>
+            <div style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:600,marginBottom:4}}>Overdue Payments</div>
+            <div style={{fontSize:24,fontWeight:300,fontFamily:"Georgia,serif",color:overduePayL.length>0?C.red:C.grn}}>{overduePayL.length}</div>
+            <div style={{fontSize:10,color:C.mut,marginTop:2}}>Need follow-up → Finance</div>
+          </div>
+        </div>
+        {/* Funnel + panels */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+          <PipelineFunnel leads={leads} nav={nav}/>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <TodayFollowUps dueFollowups={dueFollowups} nav={nav}/>
+            <UpcomingVisits upcomingVisits={upcomingVisits} nav={nav}/>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+          <OverduePayments overduePayL={overduePayL} nav={nav}/>
+          <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr}`,fontWeight:700,fontSize:12}}>⚡ Quick Actions</div>
+            <div style={{padding:12,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {[["➕ Add Lead","openAdd"],["📞 Call Queue","callqueue"],["✅ Qualified","qualified"],["💳 Finance","finance"],["⊞ Pipeline","pipeline"],["💬 Chatbot","chatbot"]].map(([t,action])=>(
+                <div key={t} onClick={action==="openAdd"?openAdd:()=>nav(action)} style={{border:`1px solid ${C.bdr}`,borderRadius:9,padding:"10px 12px",cursor:"pointer",fontSize:11,fontWeight:600}} onMouseOver={e=>e.currentTarget.style.borderColor=C.gld} onMouseOut={e=>e.currentTarget.style.borderColor=C.bdr}>{t}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Telecaller dashboard
+  if(role==="telecaller"){
+    const myLeads=leads.filter(l=>l.assignedTo===currentUser.name);
+    const myDue=dueFollowups.filter(l=>l.assignedTo===currentUser.name);
+    return (
+      <div>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:14}}>Welcome back, {currentUser.name} 👋</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
+          <StatCard label="My Leads"       val={myLeads.length}  sub="Assigned to you" color={C.pur} onClick={()=>nav("leads")}/>
+          <StatCard label="Follow-ups Due" val={myDue.length}    sub="Today"           color={C.red} onClick={()=>nav("callqueue")} alert={myDue.length>0}/>
+          <StatCard label="Call Queue"     val={callPend}        sub="All pending"     color={C.org} onClick={()=>nav("callqueue")}/>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+          <TodayFollowUps dueFollowups={myDue.length>0?myDue:dueFollowups} nav={nav}/>
+          <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr}`,fontWeight:700,fontSize:12}}>⚡ Quick Actions</div>
+            <div style={{padding:12,display:"flex",flexDirection:"column",gap:8}}>
+              {[["📞 Open Call Queue","callqueue"],["🎯 View My Leads","leads"],["💬 Chatbot / Capture","chatbot"]].map(([t,p])=>(
+                <div key={t} onClick={()=>nav(p)} style={{border:`1px solid ${C.bdr}`,borderRadius:9,padding:"11px 14px",cursor:"pointer",fontSize:12,fontWeight:600}} onMouseOver={e=>e.currentTarget.style.borderColor=C.gld} onMouseOut={e=>e.currentTarget.style.borderColor=C.bdr}>{t}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Designer dashboard
+  if(role==="designer"){
+    const toBrief=leads.filter(l=>l.confirmed&&!l.brief);
+    const inDesign=leads.filter(l=>l.projectJourney?.designPhase?.started&&l.projectJourney?.designPhase?.status!=="approved");
+    const inExec=leads.filter(l=>l.projectJourney?.executionPhase?.started&&l.projectJourney?.executionPhase?.status!=="handover");
+    return (
+      <div>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:14}}>Designer Dashboard — {currentUser.name}</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
+          <StatCard label="Brief Pending"  val={toBrief.length}  sub="Confirmed leads" color={C.org} onClick={()=>nav("brief")} alert={toBrief.length>0}/>
+          <StatCard label="Design Active"  val={inDesign.length} sub="In progress"     color={C.pur} onClick={()=>nav("qualified")}/>
+          <StatCard label="In Execution"   val={inExec.length}   sub="On site"         color={C.blu} onClick={()=>nav("qualified")}/>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+          <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr}`,fontWeight:700,fontSize:12}}>📋 Pending Briefs</div>
+            {toBrief.length===0?<div style={{padding:14,fontSize:11,color:C.mut,textAlign:"center"}}>All briefs done ✓</div>:toBrief.map(l=>(
+              <div key={l.id} onClick={()=>nav("brief")} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderBottom:`1px solid ${C.bdr}`,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.background=C.bg} onMouseOut={e=>e.currentTarget.style.background=""}>
+                <div style={{flex:1}}><div style={{fontSize:12,fontWeight:600}}>{l.name}</div><div style={{fontSize:10,color:C.mut}}>{l.projectType}</div></div>
+                <button style={B("gold",true)} onClick={e=>{e.stopPropagation();nav("brief");}}>Brief →</button>
+              </div>
+            ))}
+          </div>
+          <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr}`,fontWeight:700,fontSize:12}}>🔨 Active Execution</div>
+            {inExec.length===0?<div style={{padding:14,fontSize:11,color:C.mut,textAlign:"center"}}>No active execution</div>:inExec.map(l=>(
+              <div key={l.id} onClick={()=>nav("qualified")} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderBottom:`1px solid ${C.bdr}`,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.background=C.bg} onMouseOut={e=>e.currentTarget.style.background=""}>
+                <div style={{flex:1}}><div style={{fontSize:12,fontWeight:600}}>{l.name}</div><div style={{fontSize:10,color:C.mut}}>{l.projectJourney?.executionPhase?.status||"In progress"}</div></div>
+                <span style={{fontSize:10,background:C.bluL,color:C.blu,fontWeight:700,padding:"2px 8px",borderRadius:20}}>Active</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Finance dashboard
+  if(role==="finance"){
+    const totalSched=leads.reduce((s,l)=>(l.projectJourney?.payments||[]).reduce((ps,p)=>ps+(parseFloat(p.scheduledAmt)||0),ps),0);
+    const totalRec=leads.reduce((s,l)=>(l.projectJourney?.payments||[]).reduce((ps,p)=>ps+(parseFloat(p.receivedAmt)||0),ps),0);
+    return (
+      <div>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:14}}>Finance Dashboard</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
+          <StatCard label="Total Scheduled" val={"₹"+totalSched.toFixed(1)+"L"} sub="All projects" color={C.deep}/>
+          <StatCard label="Total Received"  val={"₹"+totalRec.toFixed(1)+"L"}  sub="Collected"    color={C.grn}/>
+          <StatCard label="Pending"         val={"₹"+(totalSched-totalRec).toFixed(1)+"L"} sub="To collect" color={C.org}/>
+          <StatCard label="Overdue"         val={overduePayL.length}  sub="Need follow-up" color={C.red} alert={overduePayL.length>0} onClick={()=>nav("finance")}/>
+        </div>
+        <OverduePayments overduePayL={overduePayL} nav={nav}/>
+      </div>
+    );
+  }
+
+  return <Empty icon="⬚" title="Dashboard" sub="Loading..."/>;
+}
+
+// ─── FINANCE PAGE ─────────────────────────────────────────────────────────────
+function FinancePage({leads,updLead,showToast,openLeadDetail}){
+  const [filter,setFilter]=useState("all");
+  const projectLeads=leads.filter(l=>l.projectJourney?.payments?.length>0);
+  const shown=filter==="overdue"?projectLeads.filter(l=>l.projectJourney?.payments?.some(p=>p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY)):filter==="pending"?projectLeads.filter(l=>l.projectJourney?.payments?.some(p=>p.status==="pending")):projectLeads;
+
+  const totalSched=projectLeads.reduce((s,l)=>(l.projectJourney?.payments||[]).reduce((ps,p)=>ps+(parseFloat(p.scheduledAmt)||0),ps),0);
+  const totalRec=projectLeads.reduce((s,l)=>(l.projectJourney?.payments||[]).reduce((ps,p)=>ps+(parseFloat(p.receivedAmt)||0),ps),0);
+  const totalOverdue=projectLeads.filter(l=>l.projectJourney?.payments?.some(p=>p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY)).length;
+
+  return (
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
+        <StatCard label="Total Scheduled" val={"₹"+totalSched.toFixed(1)+"L"} sub="All projects"  color={C.deep}/>
+        <StatCard label="Received"        val={"₹"+totalRec.toFixed(1)+"L"}   sub="Collected"     color={C.grn}/>
+        <StatCard label="Pending"         val={"₹"+(totalSched-totalRec).toFixed(1)+"L"} sub="To collect" color={C.org}/>
+        <StatCard label="Overdue"         val={totalOverdue} sub="Need follow-up" color={C.red} alert={totalOverdue>0}/>
+      </div>
+
+      <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+        <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.bdr}`,background:C.bg,borderRadius:"12px 12px 0 0",display:"flex",gap:8,alignItems:"center"}}>
+          <div style={{fontSize:12,fontWeight:700,flex:1}}>Payment Tracker</div>
+          {[["all","All"],["pending","Pending"],["overdue","Overdue"]].map(([id,lb])=>(
+            <button key={id} onClick={()=>setFilter(id)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${filter===id?C.deep:C.bdr}`,background:filter===id?C.deep:"transparent",color:filter===id?"#fff":C.mut,fontSize:11,cursor:"pointer",fontWeight:600}}>{lb}</button>
+          ))}
+        </div>
+        {shown.length===0?<Empty icon="💳" title="No projects found" sub="Projects with payment data appear here"/>:(
+          <div>
+            {shown.map(l=>{
+              const pays=l.projectJourney?.payments||[];
+              const rec=pays.reduce((s,p)=>s+(parseFloat(p.receivedAmt)||0),0);
+              const sched=pays.reduce((s,p)=>s+(parseFloat(p.scheduledAmt)||0),0);
+              const pct=sched>0?Math.round(rec/sched*100):0;
+              const hasOverdue=pays.some(p=>p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY);
+              return (
+                <div key={l.id} style={{padding:"14px 16px",borderBottom:`1px solid ${C.bdr}`,background:hasOverdue?C.redL+"44":"transparent"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:12,fontWeight:700,display:"flex",alignItems:"center",gap:8}}>
+                        {l.name}
+                        {hasOverdue&&<span style={{fontSize:10,background:C.redL,color:C.red,fontWeight:700,padding:"1px 7px",borderRadius:20}}>⚠️ Overdue</span>}
+                      </div>
+                      <div style={{fontSize:10,color:C.mut,marginTop:2}}>{l.projectType} · {l.budget} · {l.assignedTo||"—"}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontSize:13,fontWeight:700,color:C.grn}}>₹{rec.toFixed(1)}L <span style={{color:C.mut,fontWeight:400,fontSize:11}}>/ ₹{sched.toFixed(1)}L</span></div>
+                      <div style={{fontSize:10,color:C.mut}}>{pct}% collected</div>
+                    </div>
+                  </div>
+                  <div style={{height:5,background:C.bdr,borderRadius:10,overflow:"hidden",marginBottom:10}}>
+                    <div style={{height:"100%",width:pct+"%",background:pct>=100?C.grn:C.gld,borderRadius:10}}/>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    {pays.map((p,i)=>{
+                      const over=p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY;
+                      return (
+                        <div key={i} style={{background:p.status==="paid"?C.grnL:over?C.redL:C.bg,border:`1px solid ${p.status==="paid"?C.grn:over?C.red:C.bdr}`,borderRadius:8,padding:"6px 10px",minWidth:110}}>
+                          <div style={{fontSize:9,fontWeight:700,color:p.status==="paid"?C.grn:over?C.red:C.mut,textTransform:"uppercase",letterSpacing:.4}}>{p.label}</div>
+                          <div style={{fontSize:11,fontWeight:700,marginTop:2}}>₹{p.scheduledAmt||"—"}L</div>
+                          <div style={{fontSize:9,color:C.mut}}>{p.status==="paid"?"✓ Received":over?"Overdue":"Pending"}{p.dueDate?" · "+p.dueDate:""}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{marginTop:10,display:"flex",gap:8}}>
+                    <button style={B("outline",true)} onClick={()=>openLeadDetail(l.id)}>View Lead</button>
+                    {hasOverdue&&<a href={`https://wa.me/${l.phone?.replace(/\D/g,"")}`} target="_blank" style={{...B("wa",true),textDecoration:"none"}}>💬 WhatsApp Reminder</a>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── USERS PAGE ───────────────────────────────────────────────────────────────
+function UsersPage({users,setUsers,showToast,currentUser}){
+  const [adding,setAdding]=useState(false);
+  const [form,setForm]=useState({name:"",username:"",password:"",role:"telecaller"});
+  const f=k=>e=>setForm(p=>({...p,[k]:e.target.value}));
+
+  function addUser(){
+    if(!form.name||!form.username||!form.password){alert("Fill all fields");return;}
+    if(users.find(u=>u.username===form.username)){alert("Username taken");return;}
+    const u={...form,id:Date.now()};
+    setUsers([...users,u]); setAdding(false);
+    setForm({name:"",username:"",password:"",role:"telecaller"});
+    showToast("User added: "+u.name);
+  }
+  function removeUser(id){
+    if(id===currentUser.id){alert("Cannot remove yourself");return;}
+    if(!window.confirm("Remove this user?"))return;
+    setUsers(users.filter(u=>u.id!==id)); showToast("User removed");
+  }
+  function changeRole(id,role){
+    setUsers(users.map(u=>u.id===id?{...u,role}:u)); showToast("Role updated");
+  }
+  function resetPassword(id,pw){
+    if(!pw){alert("Enter new password");return;}
+    setUsers(users.map(u=>u.id===id?{...u,password:pw}:u)); showToast("Password reset");
+  }
+
+  return (
+    <div>
+      <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12,marginBottom:14}}>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:12,fontWeight:700}}>Team Members ({users.length})</div>
+          <button style={B("gold",true)} onClick={()=>setAdding(s=>!s)}>+ Add User</button>
+        </div>
+        {adding&&(
+          <div style={{padding:"16px 18px",borderBottom:`1px solid ${C.bdr}`,background:C.bg,animation:"fadeIn .2s ease"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10}}>
+              <FG label="Full Name"><input style={inp} value={form.name} onChange={f("name")} placeholder="e.g. Priya"/></FG>
+              <FG label="Username"><input style={inp} value={form.username} onChange={f("username")} placeholder="e.g. priya"/></FG>
+              <FG label="Password"><input style={inp} value={form.password} onChange={f("password")} placeholder="Set password"/></FG>
+              <FG label="Role">
+                <select style={selSt} value={form.role} onChange={f("role")}>
+                  {Object.entries(ROLE_LABELS).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+                </select>
+              </FG>
+            </div>
+            <div style={{display:"flex",gap:8}}><button style={B("gold")} onClick={addUser}>Add User</button><button style={B("ghost")} onClick={()=>setAdding(false)}>Cancel</button></div>
+          </div>
+        )}
+        {users.map(u=>(
+          <UserRow key={u.id} u={u} isSelf={u.id===currentUser.id} onRemove={()=>removeUser(u.id)} onRoleChange={r=>changeRole(u.id,r)} onPasswordReset={pw=>resetPassword(u.id,pw)}/>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function UserRow({u,isSelf,onRemove,onRoleChange,onPasswordReset}){
+  const [editPw,setEditPw]=useState(false);
+  const [newPw,setNewPw]=useState("");
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:14,padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`}}>
+      <div style={{width:34,height:34,borderRadius:"50%",background:C.bg,border:`2px solid ${C.bdr}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{ROLE_ICONS[u.role]}</div>
+      <div style={{flex:1}}>
+        <div style={{fontSize:12,fontWeight:700,display:"flex",alignItems:"center",gap:7}}>
+          {u.name}{isSelf&&<span style={{fontSize:9,background:C.gldL,color:C.gldD,fontWeight:700,padding:"1px 6px",borderRadius:20}}>You</span>}
+        </div>
+        <div style={{fontSize:10,color:C.mut}}>@{u.username}</div>
+      </div>
+      <select style={{...selSt,width:"auto"}} value={u.role} onChange={e=>onRoleChange(e.target.value)} disabled={isSelf}>
+        {Object.entries(ROLE_LABELS).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+      </select>
+      {editPw
+        ?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <input style={{...inp,width:130}} value={newPw} onChange={e=>setNewPw(e.target.value)} placeholder="New password"/>
+            <button style={B("gold",true)} onClick={()=>{onPasswordReset(newPw);setEditPw(false);setNewPw("");}}>Save</button>
+            <button style={B("ghost",true)} onClick={()=>setEditPw(false)}>✕</button>
+          </div>
+        :<button style={B("outline",true)} onClick={()=>setEditPw(true)}>Reset PW</button>
+      }
+      {!isSelf&&<button style={B("red",true)} onClick={onRemove}>Remove</button>}
+    </div>
+  );
+}
+
+function Leads({leads,fsearch,setFs,fstage,setFst,chip,setChip,openDetail,openEdit}){
+  const chips=[["all","All"],["hot","Hot"],["calls","Needs call"],["conf","Confirmed"],["due","Follow-up due"]];
+  return <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+    <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.bdr}`,background:C.bg,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",borderRadius:"12px 12px 0 0"}}>
+      <input style={{...inp,flex:1,minWidth:150}} placeholder="Search name, location, team..." value={fsearch} onChange={e=>setFs(e.target.value)}/>
+      <select style={{...selSt,width:"auto"}} value={fstage} onChange={e=>setFst(e.target.value)}>
+        <option value="">All stages</option><option value="new">New</option><option value="qualified">Qualified</option><option value="call-pending">Call Pending</option><option value="confirmed">Confirmed</option><option value="proposal">Proposal</option><option value="closed">Closed</option>
+      </select>
+      {chips.map(([id,lb])=><button key={id} onClick={()=>setChip(id)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${chip===id?C.deep:C.bdr}`,background:chip===id?C.deep:"transparent",color:chip===id?"#fff":C.mut,fontSize:11,cursor:"pointer",fontWeight:600}}>{lb}</button>)}
+    </div>
+    {leads.length===0?<Empty icon="🎯" title="No leads found" sub="Adjust filters or add a lead"/>:(
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr>{["Lead","Phone","Project","Budget","Team","Score","Stage",""].map(h=><th key={h} style={{textAlign:"left",fontSize:10,fontWeight:600,color:C.mut,padding:"8px 13px",borderBottom:`1px solid ${C.bdr}`,textTransform:"uppercase",letterSpacing:.5}}>{h}</th>)}</tr></thead>
+        <tbody>{leads.map(l=>{
+          const isHot=l.temperature==="Hot";
+          const isDue=l.callbackDate&&l.callbackDate<=TODAY&&!l.confirmed;
+          return <tr key={l.id} onClick={()=>openDetail(l.id)} style={{cursor:"pointer"}} onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(c=>c.style.background=C.bg)} onMouseOut={e=>Array.from(e.currentTarget.cells).forEach(c=>c.style.background="")}>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}>
+              <div style={{display:"flex",alignItems:"center",gap:7}}>
+                {isHot&&<span style={{width:7,height:7,borderRadius:"50%",background:C.red,flexShrink:0,boxShadow:`0 0 5px ${C.red}`}}/>}
+                {isDue&&!isHot&&<span style={{width:7,height:7,borderRadius:"50%",background:C.org,flexShrink:0}}/>}
+                <div>
+                  <div style={{fontSize:12,fontWeight:600}}>{l.name}</div>
+                  <div style={{fontSize:10,color:C.mut}}>{l.location||"—"} · {l.source}</div>
+                </div>
+              </div>
+            </td>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`,fontSize:12}}>{l.phone||"—"}</td>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`,fontSize:12}}>{l.projectType}</td>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`,fontSize:12}}>{l.budget}</td>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}><span style={{fontSize:11,background:C.purL,color:C.pur,padding:"2px 7px",borderRadius:20,fontWeight:600}}>{l.assignedTo||"—"}</span></td>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}>{l.score!==null?<ScorePill score={l.score}/>:<span style={{fontSize:10,color:C.mut}}>—</span>}</td>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}><span style={{background:stageInfo(l.stage).bg,color:stageInfo(l.stage).c,fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:20}}>{stageInfo(l.stage).label}</span></td>
+            <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}>
+              <div style={{display:"flex",gap:6}}>
+                <button style={B("outline",true)} onClick={e=>{e.stopPropagation();openDetail(l.id);}}>Open</button>
+                <button style={B("ghost",true)} onClick={e=>{e.stopPropagation();openEdit(l.id);}}>Edit</button>
+              </div>
+            </td>
+          </tr>;
+        })}</tbody>
+      </table>
+    )}
+  </div>;
+}
+
+function CallQueue({leads,openDetail}){
+  const pending=leads.filter(l=>l.score!==null&&!l.confirmed&&l.callOutcome!=="notinterested");
+  const confirmed=leads.filter(l=>l.confirmed);
+  return <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:14}}>
+    <div>
+      <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12,marginBottom:14}}>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`,fontWeight:600,fontSize:12}}>Needs a call ({pending.length})</div>
+        {pending.length===0?<Empty icon="✅" title="Queue clear" sub="All qualified leads called"/>:pending.map(l=>(
+          <div key={l.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`}}>
+            <div style={{flex:1}}>
+              <div style={{display:"flex",alignItems:"center",gap:7}}>
+                <span style={{fontSize:12,fontWeight:600}}>{l.name}</span>
+                {l.score!==null&&<ScorePill score={l.score}/>}
+              </div>
+              <div style={{fontSize:10,color:C.mut,marginTop:2}}>{l.projectType} · {l.budget} · {l.assignedTo||"—"}</div>
+            </div>
+            <div style={{display:"flex",gap:7,alignItems:"center"}}>
+              <a href={`tel:${l.phone}`} style={{...B("green",true),textDecoration:"none"}}>📞 {l.phone}</a>
+              <button style={B("outline",true)} onClick={()=>openDetail(l.id)}>Open</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`,fontWeight:600,fontSize:12}}>Confirmed ({confirmed.length})</div>
+        {confirmed.length===0?<div style={{padding:14,fontSize:11,color:C.mut}}>No confirmed leads yet.</div>:confirmed.map(l=>(
+          <div key={l.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 18px",borderBottom:`1px solid ${C.bdr}`}}>
+            <div style={{flex:1}}><div style={{fontSize:12,fontWeight:600}}>{l.name}</div><div style={{fontSize:10,color:C.mut}}>{l.projectType}</div></div>
+            <button style={B("outline",true)} onClick={()=>openDetail(l.id)}>Open</button>
+          </div>
+        ))}
+      </div>
+    </div>
+    <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12,height:"fit-content"}}>
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`,fontWeight:600,fontSize:12}}>Call tips</div>
+      <div style={{padding:16,display:"flex",flexDirection:"column",gap:10}}>
+        {[["📌","Use AI script"],["🎯","Confirm intent, not sell"],["⏰","Best: 10am-12pm, 4-6:30pm"],["🔄","No answer? Max 3 tries"],["📝","Log outcome right away"]].map(([ic,t])=>(
+          <div key={t} style={{display:"flex",gap:8,fontSize:11,alignItems:"flex-start"}}><span style={{flexShrink:0}}>{ic}</span><span>{t}</span></div>
+        ))}
+      </div>
+    </div>
+  </div>;
+}
+
+function Pipeline({leads,openDetail}){
+  const cols=[["new","New"],["qualified","Qualified"],["call-pending","Call Pending"],["confirmed","Confirmed"],["proposal","Proposal"]];
+  return <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10}}>
+    {cols.map(([stage,label])=>{
+      const sl=leads.filter(l=>l.stage===stage);
+      return <div key={stage} style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:12,minHeight:160}}>
+        <div style={{padding:"9px 12px",borderBottom:`1px solid ${C.bdr}`,display:"flex",justifyContent:"space-between",fontSize:11,fontWeight:700}}>
+          <span>{label}</span><span style={{fontSize:10,background:C.bdr,padding:"1px 6px",borderRadius:10}}>{sl.length}</span>
+        </div>
+        <div style={{padding:8}}>
+          {sl.length===0?<div style={{fontSize:10,color:C.mut,textAlign:"center",padding:14}}>Empty</div>:sl.map(l=>(
+            <div key={l.id} onClick={()=>openDetail(l.id)} style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:8,padding:10,cursor:"pointer",marginBottom:7}} onMouseOver={e=>e.currentTarget.style.borderColor=C.gld} onMouseOut={e=>e.currentTarget.style.borderColor=C.bdr}>
+              <div style={{fontSize:11,fontWeight:600}}>{l.name}</div>
+              <div style={{fontSize:10,color:C.mut,marginTop:2}}>{l.budget}</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6}}>
+                <span style={{fontSize:9,color:C.mut}}>{l.assignedTo||"—"}</span>
+                {l.score!==null&&<ScorePill score={l.score}/>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>;
+    })}
+  </div>;
+}
+
+function BriefPage({leads,openDetail}){
+  const cl=leads.filter(l=>l.confirmed);
+  return <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+    <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`,fontWeight:600,fontSize:12}}>Design Brief Agent</div>
+    <div style={{padding:16}}>
+      {cl.length===0?<Empty icon="📋" title="No confirmed leads yet" sub="Confirm a lead via call first"/>:cl.map(l=>(
+        <div key={l.id} onClick={()=>openDetail(l.id)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 13px",border:`1px solid ${C.bdr}`,borderRadius:9,marginBottom:9,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.borderColor=C.gld} onMouseOut={e=>e.currentTarget.style.borderColor=C.bdr}>
+          <div><div style={{fontSize:12,fontWeight:600}}>{l.name}</div><div style={{fontSize:10,color:C.mut}}>{l.projectType} · {l.budget}</div></div>
+          <button style={B("gold",true)} onClick={e=>{e.stopPropagation();openDetail(l.id);}}>{l.brief?"View":"Generate"}</button>
+        </div>
+      ))}
+    </div>
+  </div>;
+}
+
+function ProposalsPage({leads,openDetail}){
+  const wl=leads.filter(l=>l.brief);
+  return <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+    <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`,fontWeight:600,fontSize:12}}>Proposal Writer Agent</div>
+    <div style={{padding:16}}>
+      {wl.length===0?<Empty icon="📄" title="No briefs yet" sub="Generate a design brief first"/>:wl.map(l=>(
+        <div key={l.id} onClick={()=>openDetail(l.id)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 13px",border:`1px solid ${C.bdr}`,borderRadius:9,marginBottom:9,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.borderColor=C.gld} onMouseOut={e=>e.currentTarget.style.borderColor=C.bdr}>
+          <div><div style={{fontSize:12,fontWeight:600}}>{l.name}</div><div style={{fontSize:10,color:C.mut}}>{l.projectType} · {l.budget}</div></div>
+          <button style={B("gold",true)} onClick={e=>{e.stopPropagation();openDetail(l.id);}}>{l.proposal?"View":"Generate"}</button>
+        </div>
+      ))}
+    </div>
+  </div>;
+}
+
+function Chatbot({leads,setLeads,apiKey,showToast}){
+  const [msgs,setMsgs]=useState([{type:"bot",text:"Hi! Welcome to Homealive. What space are you looking to design?"}]);
+  const [input,setInput]=useState(""); const [hist,setHist]=useState([]); const [cap,setCap]=useState({}); const [busy,setBusy]=useState(false);
+  const endRef=useRef(null);
+  useEffect(()=>{if(endRef.current)endRef.current.scrollIntoView({behavior:"smooth"})},[msgs]);
+
+  async function send(){
+    if(!input.trim()||busy)return; const msg=input.trim(); setInput(""); setBusy(true);
+    setMsgs(p=>[...p,{type:"user",text:msg}]); const nh=[...hist,{role:"user",content:msg}]; setHist(nh);
+    try{
+      const res=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json","anthropic-dangerous-direct-browser-access":"true","x-api-key":apiKey,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:300,system:`Homealive interior design chatbot Bangalore. Warm, brief. Gather one at a time: project, budget, timeline, location, name, phone. End each reply: [CAPTURED: {"name":"","phone":"","location":"","budget":"","project":"","timeline":""}] with known values. Max 2 sentences.`,messages:nh})});
+      const data=await res.json(); let reply=(data.content&&data.content[0]&&data.content[0].text)||"Thanks!";
+      const m=reply.match(/\[CAPTURED:\s*({[^}]+})\]/); if(m){try{const c=JSON.parse(m[1]);setCap(p=>({...p,...Object.fromEntries(Object.entries(c).filter(([,v])=>v))}));}catch(e){}}
+      reply=reply.replace(/\[CAPTURED:[^\]]+\]/,"").trim();
+      setMsgs(p=>[...p,{type:"bot",text:reply}]); setHist(p=>[...p,{role:"assistant",content:reply}]);
+    }catch(e){setMsgs(p=>[...p,{type:"bot",text:"Error: "+e.message}]);}
+    setBusy(false);
+  }
+  const fields=[["Name",cap.name],["Phone",cap.phone],["Location",cap.location],["Budget",cap.budget],["Project",cap.project],["Timeline",cap.timeline]].filter(([,v])=>v);
+  return <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+    <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+      <div style={{background:C.deep,padding:"10px 14px",display:"flex",gap:9,alignItems:"center",borderRadius:"12px 12px 0 0"}}><div style={{width:7,height:7,background:"#4CAF50",borderRadius:"50%"}}/><span style={{color:"#fff",fontSize:12,fontWeight:600}}>Homealive Live Chat</span></div>
+      <div style={{height:300,overflowY:"auto",padding:13,display:"flex",flexDirection:"column",gap:8}}>
+        {msgs.map((m,i)=><div key={i} style={{display:"flex",justifyContent:m.type==="user"?"flex-end":"flex-start"}}><div style={{maxWidth:"78%",padding:"8px 12px",borderRadius:m.type==="user"?"12px 4px 12px 12px":"4px 12px 12px 12px",background:m.type==="user"?C.deep:C.bg,color:m.type==="user"?"#fff":C.deep,border:m.type==="bot"?`1px solid ${C.bdr}`:"none",fontSize:12,lineHeight:1.55}}>{m.text}</div></div>)}
+        {busy&&<div style={{display:"flex"}}><div style={{background:C.gldL,borderRadius:9,padding:"7px 12px",display:"flex",gap:8,alignItems:"center",fontSize:11,color:C.gldD}}><Spinner/>Typing...</div></div>}
+        <div ref={endRef}/>
+      </div>
+      <div style={{padding:10,borderTop:`1px solid ${C.bdr}`,display:"flex",gap:8}}><input style={{...inp,flex:1}} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder="Type message..."/><button style={B("gold")} onClick={send} disabled={busy}>Send</button></div>
+    </div>
+    <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontWeight:600,fontSize:12}}>Captured data</span>
+        <button style={B("gold",true)} onClick={()=>{if(!cap.name&&!cap.phone){alert("Need name or phone");return;} const l=makeLead({name:cap.name||"Website visitor",phone:cap.phone||"",source:"Website Chatbot",location:cap.location||"",projectType:cap.project||"Enquiry",budget:cap.budget||"Not specified",timeline:cap.timeline||"Not specified",notes:"Via chatbot"}); setLeads(p=>[...p,l]); showToast("Saved: "+l.name);}}>Save as lead</button>
+      </div>
+      <div style={{padding:16}}>{fields.length===0?<div style={{fontSize:11,color:C.mut}}>Details appear as visitor chats.</div>:fields.map(([k,v])=><div key={k} style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}><span style={{fontSize:10,color:C.mut,minWidth:60,textTransform:"uppercase",fontWeight:600,letterSpacing:.5}}>{k}</span><span style={{fontSize:12,fontWeight:600}}>{v}</span></div>)}</div>
+    </div>
+  </div>;
+}
+
+function LeadDetail({lead,updLead,onClose,apiKey,showToast,onEdit}){
+  const [tab,setTab]   = useState("qualify");
+  const [out,setOut]   = useState({qualify:"",script:"",brief:"",proposal:""});
+  const [load,setLoad] = useState({qualify:false,script:false,brief:false,proposal:false});
+  const [outcome,setOutcome]   = useState(null);
+  const [interest,setInterest] = useState(null);
+  const [cnotes,setCnotes]     = useState(lead&&lead.callNotes||"");
+  const [callBy,setCallBy]     = useState(lead&&lead.callBy||(lead&&lead.assignedTo&&lead.assignedTo!=="Unassigned"?lead.assignedTo:"Krish"));
+  const [cbdate,setCbdate]     = useState("");
+  const [bf,setBf]  = useState({size:"",rooms:"",style:"Contemporary",priority:"Aesthetics",dislikes:"",special:""});
+  const [pf,setPf]  = useState({fee:"",timeline:"",tone:"Warm and personal"});
+  const [fuDate,setFuDate] = useState("");
+  const [fuNote,setFuNote] = useState("");
+
+  if(!lead) return null;
+
+  const ss=t=>{
+    if(t==="qualify") return lead.score!==null?"done":tab==="qualify"?"active":"idle";
+    if(t==="call") return lead.confirmed?"done":tab==="call"?"active":"idle";
+    if(t==="brief") return lead.brief?"done":tab==="brief"?"active":"idle";
+    if(t==="proposal") return lead.proposal?"done":tab==="proposal"?"active":"idle";
+    return "idle";
+  };
+
+  async function qualify(){
+    setLoad(p=>({...p,qualify:true})); setOut(p=>({...p,qualify:""}));
+    try{
+      const r=await callAI(`Senior sales qualifier for Homealive, premium interior design, Bangalore. Analyse and respond EXACTLY:\nSCORE: [0-100]\nTEMPERATURE: [Hot/Warm/Cold]\nANALYSIS: [3-4 lines]\nOPPORTUNITY: [one]\nRISK: [one]\nCALL PRIORITY: [Immediate/Within 24hrs/Within 3 days]\n\nName:${lead.name}|Project:${lead.projectType}|Budget:${lead.budget}|Timeline:${lead.timeline}|Location:${lead.location||"Bangalore"}|Property:${lead.property}|Source:${lead.source}|Notes:${lead.notes||"None"}`,
+        null,p=>setOut(q=>({...q,qualify:p})),apiKey);
+      const sm=r.match(/SCORE:\s*(\d+)/); const tm=r.match(/TEMPERATURE:\s*(Hot|Warm|Cold)/);
+      if(sm) updLead(lead.id,{score:parseInt(sm[1]),temperature:tm?tm[1]:parseInt(sm[1])>=75?"Hot":parseInt(sm[1])>=50?"Warm":"Cold",scoreAnalysis:r,stage:"call-pending"});
+      showToast("Lead qualified");
+    }catch(e){setOut(p=>({...p,qualify:"Error: "+e.message}));showToast(e.message,"err");}
+    setLoad(p=>({...p,qualify:false}));
+  }
+
+  async function script(){
+    setLoad(p=>({...p,script:true})); setOut(p=>({...p,script:""}));
+    try{
+      const r=await callAI(`Write natural warm phone script for Homealive calling ${lead.name}.\nLead: ${lead.projectType}|${lead.budget}|${lead.timeline}|${lead.location||"Bangalore"}|Score:${lead.score||"?"}(${lead.temperature||"?"})|Notes:${lead.notes||"None"}\n1)Warm intro as Homealive 2)Why calling 3)3 qualifying questions 4)Handle browsing 5)Book free consultation 6)Sign-off\n[Pause][Listen] markers. Under 250 words. Human not robotic.`,
+        null,p=>setOut(q=>({...q,script:p})),apiKey);
+      updLead(lead.id,{callScript:r});
+    }catch(e){setOut(p=>({...p,script:"Error: "+e.message}));showToast(e.message,"err");}
+    setLoad(p=>({...p,script:false}));
+  }
+
+  function addFollowUp(){
+    if(!fuDate){alert("Pick a follow-up date");return;}
+    const fu={date:fuDate,note:fuNote,addedAt:new Date().toLocaleString("en-IN"),done:false};
+    updLead(lead.id,{followUps:[...(lead.followUps||[]),fu],callbackDate:fuDate});
+    setFuDate(""); setFuNote(""); showToast("Follow-up scheduled: "+fuDate);
+  }
+
+  function markFollowUpDone(i){
+    const fus=[...(lead.followUps||[])]; fus[i]={...fus[i],done:true};
+    updLead(lead.id,{followUps:fus}); showToast("Follow-up done");
+  }
+
+  function confirmLead(){
+    if(!interest){alert("Select interest level");return;}
+    const entry={time:new Date().toLocaleString("en-IN"),outcome:"answered",interest,notes:cnotes,calledBy:callBy};
+    updLead(lead.id,{confirmed:true,stage:"confirmed",callOutcome:"answered",callInterest:interest,callNotes:cnotes,callBy,callHistory:[...(lead.callHistory||[]),entry]});
+    showToast(lead.name+" confirmed!"); setTab("brief");
+  }
+  function scheduleCallback(){
+    if(!cbdate){alert("Pick a callback date");return;}
+    const entry={time:new Date().toLocaleString("en-IN"),outcome:"callback",callbackDate:cbdate,notes:cnotes,calledBy:callBy};
+    updLead(lead.id,{callOutcome:"callback",callbackDate:cbdate,callNotes:cnotes,callBy,stage:"call-pending",callHistory:[...(lead.callHistory||[]),entry]});
+    showToast("Callback: "+cbdate);
+  }
+  function closeLead(){
+    if(!window.confirm("Mark "+lead.name+" as not interested?"))return;
+    updLead(lead.id,{callOutcome:"notinterested",stage:"closed",callHistory:[...(lead.callHistory||[]),{time:new Date().toLocaleString("en-IN"),outcome:"notinterested",notes:cnotes,calledBy:callBy}]});
+    onClose();
+  }
+
+  async function runBrief(){
+    if(!lead.confirmed){alert("Confirm via call first");return;}
+    setLoad(p=>({...p,brief:true})); setOut(p=>({...p,brief:""}));
+    try{
+      const r=await callAI(`Senior interior designer Homealive Bangalore. Create design brief:\nCLIENT:${lead.name}|PROJECT:${lead.projectType}|BUDGET:${lead.budget}|TIMELINE:${lead.timeline}\nSIZE:${bf.size||"N/A"}sqft|ROOMS:${bf.rooms||"N/A"}|STYLE:${bf.style}|PRIORITY:${bf.priority}\nDISLIKES:${bf.dislikes||"None"}|SPECIAL:${bf.special||"None"}|CALL NOTES:${lead.callNotes||"None"}|INTEREST:${lead.callInterest||"Confirmed"}\nSections: 1)Project Overview 2)Style Direction 3)Scope 4)Design Principles 5)Avoid 6)Budget Guidance 7)Timeline 8)Designer Notes`,
+        null,p=>setOut(q=>({...q,brief:p})),apiKey);
+      updLead(lead.id,{brief:r,stage:"onboarding"}); showToast("Brief generated");
+    }catch(e){setOut(p=>({...p,brief:"Error: "+e.message}));showToast(e.message,"err");}
+    setLoad(p=>({...p,brief:false}));
+  }
+
+  async function runProposal(){
+    if(!lead.brief){alert("Generate brief first");return;}
+    setLoad(p=>({...p,proposal:true})); setOut(p=>({...p,proposal:""}));
+    try{
+      const r=await callAI(`Warm premium client proposal for Homealive, Bangalore.\nCLIENT:${lead.name}|PROJECT:${lead.projectType}|FEE:${pf.fee||"?"}L|TIMELINE:${pf.timeline||"?"}weeks\nTONE:${pf.tone}|BUDGET:${lead.budget}|INTEREST:${lead.callInterest||"Confirmed"}\nBRIEF:${lead.brief&&lead.brief.substring(0,400)||"Full home design"}\n1)Warm opening to ${lead.name} 2)Understanding vision 3)Scope 4)3-phase process 5)Investment+milestones 6)Timeline 7)Why Homealive 8)Next step 9)Warm close. Under 600 words.`,
+        null,p=>setOut(q=>({...q,proposal:p})),apiKey);
+      updLead(lead.id,{proposal:r,stage:"proposal"}); showToast("Proposal generated");
+    }catch(e){setOut(p=>({...p,proposal:"Error: "+e.message}));showToast(e.message,"err");}
+    setLoad(p=>({...p,proposal:false}));
+  }
+
+  function shareWhatsApp(){
+    const text=lead.proposal||`Hi ${lead.name}, following up from Homealive regarding your ${lead.projectType} enquiry.`;
+    window.open(`https://wa.me/${lead.phone&&lead.phone.replace(/\D/g,"")}?text=${encodeURIComponent(text.substring(0,1000))}`,"_blank");
+  }
+
+  function printProposal(){
+    const w=window.open("","_blank");
+    w.document.write(`<html><head><title>Proposal - ${lead.name}</title><style>body{font-family:Georgia,serif;max-width:700px;margin:40px auto;line-height:1.7;color:#1A1714;font-size:14px}pre{white-space:pre-wrap;font-family:Georgia,serif}</style></head><body><h1>Homealive Design Proposal</h1><p style="color:#7A7068">${lead.name} - ${lead.projectType} - ${lead.budget}</p><hr/><pre>${lead.proposal||"Not generated yet."}</pre></body></html>`);
+    w.document.close(); w.print();
+  }
+
+  const stepSt=t=>({display:"flex",alignItems:"center",gap:7,padding:"6px 12px",borderRadius:7,fontSize:11,fontWeight:600,cursor:"pointer",background:tab===t?C.gldL:ss(t)==="done"?C.grnL:"transparent",color:tab===t?C.gldD:ss(t)==="done"?C.grn:C.mut});
+  const numSt=t=>({width:19,height:19,borderRadius:"50%",background:tab===t?C.gld:ss(t)==="done"?C.grn:C.bdr,color:ss(t)==="done"||tab===t?"#fff":C.mut,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,flexShrink:0});
+
+  return (
+    <Overlay onClose={onClose}>
+      <ModalBox w={760}>
+        <MHead
+          title={<div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
+            {lead.name}
+            {lead.temperature&&<Bdg t={lead.temperature}>{lead.temperature}</Bdg>}
+            {lead.score!==null&&<ScorePill score={lead.score}/>}
+            <span style={{background:stageInfo(lead.stage).bg,color:stageInfo(lead.stage).c,fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:20}}>{stageInfo(lead.stage).label}</span>
+          </div>}
+          sub={`${lead.projectType} · ${lead.phone} · Assigned: ${lead.assignedTo||"—"} · ${lead.createdAt}`}
+          onClose={onClose}
+          extra={<button style={B("ghost",true)} onClick={onEdit}>Edit</button>}
+        />
+
+        <div style={{padding:"18px 22px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:18,flexWrap:"wrap"}}>
+            {[["qualify","1","AI Qualify"],["call","2","Call Client"],["brief","3","Design Brief"],["proposal","4","Proposal"]].map(([t,n,lb],i)=>(
+              <div key={t} style={{display:"flex",alignItems:"center",gap:4}}>
+                <div style={stepSt(t)} onClick={()=>setTab(t)}><div style={numSt(t)}>{ss(t)==="done"?"✓":n}</div>{lb}</div>
+                {i<3&&<div style={{color:C.bdr,fontSize:14}}>›</div>}
+              </div>
+            ))}
+          </div>
+
+          {tab==="qualify"&&<div>
+            <div style={{display:"grid",gridTemplateColumns:"165px 1fr",gap:12,marginBottom:12}}>
+              <div style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:10,padding:14,textAlign:"center"}}>
+                <div style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:600,marginBottom:5}}>Lead score</div>
+                <div style={{fontSize:44,fontWeight:300,fontFamily:"Georgia,serif",lineHeight:1,color:lead.score!==null?(lead.score>=75?C.grn:lead.score>=50?C.gldD:C.blu):C.mut}}>{lead.score!==null?lead.score:"—"}</div>
+                {lead.temperature&&<div style={{marginTop:7}}><Bdg t={lead.temperature}>{lead.temperature}</Bdg></div>}
+                {lead.score!==null&&<div style={{marginTop:9,fontSize:10,fontWeight:600,padding:"4px 9px",borderRadius:6,display:"inline-block",background:lead.score>=75?C.grnL:lead.score>=50?C.yelL:C.bluL,color:lead.score>=75?C.grn:lead.score>=50?C.yel:C.blu}}>{lead.score>=75?"Call immediately":lead.score>=50?"Call within 24hrs":"Low priority"}</div>}
+              </div>
+              <div>
+                <div style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:600,marginBottom:8}}>Lead details</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+                  {[["Budget",lead.budget],["Timeline",lead.timeline],["Source",lead.source],["Property",lead.property],["Phone",lead.phone||"—"],["Assigned",lead.assignedTo||"—"]].map(([k,v])=>(
+                    <div key={k}><div style={{fontSize:9,color:C.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:2}}>{k}</div><div style={{fontSize:12}}>{v}</div></div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {(out.qualify||lead.scoreAnalysis)&&<AIOut text={out.qualify||lead.scoreAnalysis}/>}
+            {load.qualify&&<Think msg={"Qualifying "+lead.name+"..."}/>}
+            <div style={{display:"flex",gap:8,marginTop:12}}>
+              <button style={B("gold")} onClick={qualify} disabled={load.qualify}>{load.qualify?"Qualifying...":lead.score!==null?"Re-run Qualifier":"Run Qualifier Agent"}</button>
+              {lead.score!==null&&<button style={B("outline")} onClick={()=>setTab("call")}>Next: Call Client</button>}
+            </div>
+          </div>}
+
+          {tab==="call"&&<div>
+            {lead.confirmed&&<div style={{background:C.grnL,border:`1px solid ${C.grn}44`,borderRadius:9,padding:"11px 14px",display:"flex",gap:10,alignItems:"center",marginBottom:12}}>
+              <span style={{fontSize:18}}>✅</span>
+              <div><div style={{fontWeight:600,fontSize:12,color:C.grn}}>Call confirmed by {lead.callBy||"team"}</div><div style={{fontSize:10,color:C.grn,marginTop:1}}>Interest: {lead.callInterest}</div></div>
+            </div>}
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11,marginBottom:12}}>
+              <div style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:9,padding:13}}>
+                <div style={{fontSize:15,fontWeight:600,fontFamily:"Georgia,serif"}}>{lead.name}</div>
+                <div style={{fontSize:24,color:C.grn,fontWeight:700,marginTop:6,letterSpacing:.5,fontFamily:"monospace"}}>{lead.phone}</div>
+                <div style={{fontSize:10,color:C.mut,marginTop:2}}>{lead.projectType} · {lead.budget}</div>
+                <div style={{marginTop:12,display:"flex",gap:7,alignItems:"center",flexWrap:"wrap"}}>
+                  <a href={`tel:${lead.phone}`} style={{...B("green"),textDecoration:"none"}}>📞 Call Now</a>
+                  <a href={`https://wa.me/${lead.phone&&lead.phone.replace(/\D/g,"")}`} target="_blank" style={{...B("wa"),textDecoration:"none"}}>💬 WhatsApp</a>
+                </div>
+                <div style={{fontSize:10,color:C.grn,marginTop:8,fontWeight:500}}>Chrome will open your phone app or dial directly</div>
+                <div style={{marginTop:10}}>
+                  <label style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:600,display:"block",marginBottom:4}}>Called by</label>
+                  <select style={{...selSt,width:"auto"}} value={callBy} onChange={e=>setCallBy(e.target.value)}>
+                    {TEAM.map(t=><option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:9,padding:13}}>
+                <div style={{fontSize:9,fontWeight:600,color:C.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Best call times</div>
+                <div style={{fontSize:11,marginBottom:6}}>🌅 10:00 AM – 12:00 PM</div>
+                <div style={{fontSize:11,marginBottom:6}}>🌆 4:00 PM – 6:30 PM</div>
+                <div style={{fontSize:11,marginBottom:6}}>❌ Avoid 1-3 PM, after 8 PM</div>
+                <div style={{borderTop:`1px solid ${C.bdr}`,marginTop:10,paddingTop:10}}>
+                  <div style={{fontSize:10,color:C.mut}}>{(lead.callHistory||[]).length} call{(lead.callHistory||[]).length!==1?"s":""} logged</div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{marginBottom:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
+                <div style={{fontSize:9,fontWeight:600,color:C.mut,textTransform:"uppercase",letterSpacing:.5}}>AI Call Script</div>
+                <button style={B("outline",true)} onClick={script} disabled={load.script}>{load.script?"Generating...":"Generate Script"}</button>
+              </div>
+              {load.script&&<Think msg={"Writing script for "+lead.name+"..."}/>}
+              {(out.script||lead.callScript)&&<div style={{background:C.deep,borderRadius:10,padding:14,color:"#fff"}}>
+                <div style={{fontSize:9,color:C.gld,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:8}}>Script for {lead.name}</div>
+                <div style={{fontSize:11.5,lineHeight:1.75,color:"rgba(255,255,255,.86)",whiteSpace:"pre-wrap"}}>{out.script||lead.callScript}</div>
+              </div>}
+            </div>
+
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:9,fontWeight:600,color:C.mut,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:6}}>Call notes (fill during or after call)</label>
+              <textarea style={{...ta,minHeight:80,border:`1px solid ${C.gld}66`,background:C.gldL+"66"}} value={cnotes} onChange={e=>setCnotes(e.target.value)} placeholder="What did the client say? Requirements, objections..."/>
+            </div>
+
+            {!lead.confirmed&&<div>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:9}}>Record call outcome</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9,marginBottom:11}}>
+                {[["answered","✅","Answered","Client picked up"],["callback","🔄","No answer","Schedule callback"],["notinterested","❌","Not interested","Close lead"]].map(([o,ic,lb,sub])=>(
+                  <div key={o} onClick={()=>{setOutcome(o);setInterest(null);}} style={{border:`2px solid ${outcome===o?C.gld:C.bdr}`,borderRadius:9,padding:"11px 10px",cursor:"pointer",textAlign:"center",background:outcome===o?C.gldL:C.sur}}>
+                    <div style={{fontSize:20}}>{ic}</div><div style={{fontSize:11,fontWeight:600,marginTop:4}}>{lb}</div><div style={{fontSize:9,color:C.mut,marginTop:1}}>{sub}</div>
+                  </div>
+                ))}
+              </div>
+
+              {outcome==="answered"&&<div style={{marginBottom:11}}>
+                <div style={{fontSize:12,fontWeight:600,marginBottom:8}}>Client interest level</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:11}}>
+                  {[["very","🔥","Very interested"],["yes","👍","Interested"],["maybe","🤔","Maybe - exploring"],["no","👎","Not the right time"]].map(([v,ic,lb])=>(
+                    <div key={v} onClick={()=>setInterest(v)} style={{border:`2px solid ${interest===v?C.gld:C.bdr}`,borderRadius:7,padding:"8px 11px",cursor:"pointer",display:"flex",alignItems:"center",gap:7,fontSize:11,background:interest===v?C.gldL:C.sur,fontWeight:interest===v?600:400}}><span>{ic}</span>{lb}</div>
+                  ))}
+                </div>
+              </div>}
+
+              {outcome==="callback"&&<div style={{marginBottom:11}}>
+                <label style={{fontSize:9,fontWeight:600,color:C.mut,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:5}}>Callback date</label>
+                <input style={{...inp,maxWidth:200}} type="date" value={cbdate} onChange={e=>setCbdate(e.target.value)}/>
+              </div>}
+
+              <div style={{display:"flex",gap:8,marginBottom:14}}>
+                {outcome==="answered"&&interest&&interest!=="no"&&<button style={B("green")} onClick={confirmLead}>Confirm Lead - Move to Brief</button>}
+                {outcome==="callback"&&<button style={B("orange")} onClick={scheduleCallback}>Schedule Callback</button>}
+                {(outcome==="notinterested"||(outcome==="answered"&&interest==="no"))&&<button style={B("red")} onClick={closeLead}>Close Lead</button>}
+              </div>
+            </div>}
+
+            <div style={{borderTop:`1px solid ${C.bdr}`,paddingTop:14,marginTop:4}}>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:10}}>Schedule follow-up</div>
+              <div style={{display:"flex",gap:9,alignItems:"flex-end",marginBottom:10,flexWrap:"wrap"}}>
+                <FG label="Follow-up date"><input style={{...inp,width:160}} type="date" value={fuDate} onChange={e=>setFuDate(e.target.value)}/></FG>
+                <FG label="Note" style={{flex:1}}><input style={inp} value={fuNote} onChange={e=>setFuNote(e.target.value)} placeholder="e.g. Check if they decided on budget"/></FG>
+                <button style={{...B("gold"),flexShrink:0}} onClick={addFollowUp}>Add Follow-up</button>
+              </div>
+              {(lead.followUps||[]).length>0&&<div style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:9}}>
+                {lead.followUps.map((fu,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 13px",borderBottom:i<lead.followUps.length-1?`1px solid ${C.bdr}`:"none",opacity:fu.done?.5:1}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:fu.done?C.grn:fu.date<=TODAY?C.red:C.org,flexShrink:0}}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:11,fontWeight:600}}>{fu.date}{fu.done?" - Done":fu.date<=TODAY?" - Overdue":""}</div>
+                      {fu.note&&<div style={{fontSize:10,color:C.mut}}>{fu.note}</div>}
+                    </div>
+                    {!fu.done&&<button style={B("ghost",true)} onClick={()=>markFollowUpDone(i)}>Done</button>}
+                  </div>
+                ))}
+              </div>}
+            </div>
+
+            {(lead.callHistory||[]).length>0&&<div style={{marginTop:14}}>
+              <div style={{fontSize:9,fontWeight:600,color:C.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:7}}>Call history</div>
+              <div style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:9}}>
+                {[...lead.callHistory].reverse().map((c,i)=>(
+                  <div key={i} style={{display:"flex",gap:10,padding:"9px 13px",borderBottom:i<lead.callHistory.length-1?`1px solid ${C.bdr}`:"none"}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:c.outcome==="answered"?C.grn:c.outcome==="callback"?C.org:C.red,marginTop:4,flexShrink:0}}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:11,fontWeight:600,display:"flex",gap:8,alignItems:"center"}}>
+                        {{answered:"Answered",callback:"Callback",notinterested:"Not interested"}[c.outcome]}
+                        {c.calledBy&&<span style={{fontSize:9,color:C.mut,background:C.bg,border:`1px solid ${C.bdr}`,padding:"1px 6px",borderRadius:10}}>by {c.calledBy}</span>}
+                      </div>
+                      {c.notes&&<div style={{fontSize:10,color:C.mut}}>{c.notes.substring(0,80)}</div>}
+                      <div style={{fontSize:9,color:C.mut,marginTop:1}}>{c.time}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>}
+          </div>}
+
+          {tab==="brief"&&<div>
+            {!lead.confirmed&&<div style={{background:C.yelL,border:`1px solid ${C.yel}66`,borderRadius:7,padding:"10px 13px",fontSize:11,color:C.yel,marginBottom:12}}>Complete call confirmation first.</div>}
+            <div style={{opacity:lead.confirmed?1:.4,pointerEvents:lead.confirmed?"auto":"none"}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11,marginBottom:12}}>
+                <FG label="Property size (sq ft)"><input style={inp} value={bf.size} onChange={e=>setBf(p=>({...p,size:e.target.value}))} placeholder="e.g. 1200"/></FG>
+                <FG label="Rooms to design"><input style={inp} value={bf.rooms} onChange={e=>setBf(p=>({...p,rooms:e.target.value}))} placeholder="Living, Bedroom, Kitchen"/></FG>
+                <FG label="Style preference"><select style={selSt} value={bf.style} onChange={e=>setBf(p=>({...p,style:e.target.value}))}><option>Contemporary</option><option>Scandinavian</option><option>Traditional Indian</option><option>Transitional</option><option>Industrial</option><option>Luxury / Classic</option></select></FG>
+                <FG label="Priority"><select style={selSt} value={bf.priority} onChange={e=>setBf(p=>({...p,priority:e.target.value}))}><option>Aesthetics</option><option>Functionality</option><option>Storage</option><option>Value for money</option><option>Premium materials</option></select></FG>
+                <FG label="What they do NOT want" full><input style={inp} value={bf.dislikes} onChange={e=>setBf(p=>({...p,dislikes:e.target.value}))} placeholder="Dark colours, cluttered look..."/></FG>
+                <FG label="Special requirements" full><textarea style={ta} value={bf.special} onChange={e=>setBf(p=>({...p,special:e.target.value}))} placeholder="Kids, elderly, WFH, pets..."/></FG>
+              </div>
+              <button style={B("gold")} onClick={runBrief} disabled={load.brief}>{load.brief?"Generating...":"Generate Design Brief"}</button>
+              {load.brief&&<Think msg={"Writing brief for "+lead.name+"..."}/>}
+              {(out.brief||lead.brief)&&<div><AIOut text={out.brief||lead.brief}/><div style={{marginTop:9}}><button style={B("outline")} onClick={()=>setTab("proposal")}>Next: Proposal</button></div></div>}
+            </div>
+          </div>}
+
+          {tab==="proposal"&&<div>
+            {!lead.brief&&<div style={{background:C.yelL,border:`1px solid ${C.yel}66`,borderRadius:7,padding:"10px 13px",fontSize:11,color:C.yel,marginBottom:12}}>Generate design brief first.</div>}
+            <div style={{opacity:lead.brief?1:.4,pointerEvents:lead.brief?"auto":"none"}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11,marginBottom:12}}>
+                <FG label="Proposed fee (lakhs)"><input style={inp} value={pf.fee} onChange={e=>setPf(p=>({...p,fee:e.target.value}))} placeholder="e.g. 12"/></FG>
+                <FG label="Timeline (weeks)"><input style={inp} value={pf.timeline} onChange={e=>setPf(p=>({...p,timeline:e.target.value}))} placeholder="e.g. 14"/></FG>
+                <FG label="Tone" full><select style={{...selSt,width:"100%"}} value={pf.tone} onChange={e=>setPf(p=>({...p,tone:e.target.value}))}><option>Warm and personal</option><option>Professional and formal</option><option>Luxury and premium</option></select></FG>
+              </div>
+              <div style={{display:"flex",gap:8,marginBottom:12}}>
+                <button style={B("gold")} onClick={runProposal} disabled={load.proposal}>{load.proposal?"Writing...":"Generate Proposal"}</button>
+                {lead.proposal&&<button style={B("outline")} onClick={printProposal}>Print / PDF</button>}
+                {lead.proposal&&<button style={B("wa")} onClick={shareWhatsApp}>WhatsApp</button>}
+              </div>
+              {load.proposal&&<Think msg={"Writing proposal for "+lead.name+"..."}/>}
+              {(out.proposal||lead.proposal)&&<AIOut text={out.proposal||lead.proposal}/>}
+            </div>
+          </div>}
+        </div>
+      </ModalBox>
+    </Overlay>
+  );
+}
+
+function Overlay({children,onClose}){
+  return <div style={{position:"fixed",inset:0,background:"rgba(26,23,20,.55)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(3px)"}} onClick={onClose}>{children}</div>;
+}
+function ModalBox({children,w}){
+  w=w||680;
+  return <div style={{background:C.sur,borderRadius:14,width:w,maxWidth:"95vw",maxHeight:"92vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(26,23,20,.22)"}} onClick={e=>e.stopPropagation()}>{children}</div>;
+}
+function MHead({title,sub,onClose,extra}){
+  return <div style={{padding:"17px 22px",borderBottom:`1px solid ${C.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start",position:"sticky",top:0,background:C.sur,borderRadius:"14px 14px 0 0",zIndex:2}}>
+    <div><div style={{fontSize:14,fontWeight:600,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>{title}</div>{sub&&<div style={{fontSize:10,color:C.mut,marginTop:2}}>{sub}</div>}</div>
+    <div style={{display:"flex",gap:8,alignItems:"center"}}>{extra}<button style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:C.mut}} onClick={onClose}>x</button></div>
+  </div>;
+}
+function AIOut({text}){
+  return <div style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:9,padding:14,fontSize:12,lineHeight:1.75,whiteSpace:"pre-wrap",color:C.deep,maxHeight:340,overflowY:"auto",marginTop:12}}>{text}</div>;
+}
+function Think({msg}){
+  return <div style={{display:"flex",alignItems:"center",gap:9,padding:"10px 13px",background:C.gldL,border:`1px solid ${C.gld}44`,borderRadius:9,fontSize:11,color:C.gldD,marginTop:10}}><Spinner/><span>{msg}</span></div>;
+}
+
+
+// ─── QUALIFIED LEADS — DATA HELPERS ─────────────────────────────────────────
+
+function makeProjectJourney(){
+  return {
+    followUps: [],           // [{date,method,notes,outcome,by}]
+    siteVisit: {scheduled:"", done:false, notes:""},
+    quotation: {sent:false, sentDate:"", timing:"after_visit", notes:""},  // timing: before_visit|after_visit
+    quotationFollowUps: [],  // [{date,method,notes,outcome,by}]
+    orderConfirmed: {done:false, date:"", notes:""},
+    token: {received:false, date:"", amount:"", notes:""},
+    designPhase: {started:false, startDate:"", endDate:"", notes:""},
+    executionPhase: {started:false, startDate:"", endDate:"", notes:""},
+    payments: [
+      {id:1, label:"Token Payment",        pct:10, phase:"token",     status:"pending", scheduledAmt:"", receivedAmt:"", dueDate:"", receivedDate:""},
+      {id:2, label:"Execution Start",      pct:50, phase:"execution", status:"pending", scheduledAmt:"", receivedAmt:"", dueDate:"", receivedDate:""},
+      {id:3, label:"Lamination Milestone", pct:30, phase:"lamination",status:"pending", scheduledAmt:"", receivedAmt:"", dueDate:"", receivedDate:""},
+      {id:4, label:"Completion",           pct:10, phase:"completion", status:"pending", scheduledAmt:"", receivedAmt:"", dueDate:"", receivedDate:""},
+    ]
+  };
+}
+
+const PIPELINE_STAGES = [
+  {id:"qualified",     label:"Qualified",          icon:"🎯", color:C.pur,  bg:C.purL},
+  {id:"followup",      label:"Follow-ups",          icon:"📞", color:C.org,  bg:C.orgL},
+  {id:"sitevisit",     label:"Site Visit",          icon:"🏠", color:C.blu,  bg:C.bluL},
+  {id:"quotation",     label:"Quotation",           icon:"📑", color:C.gldD, bg:C.gldL},
+  {id:"negotiation",   label:"Negotiation/Follow",  icon:"🤝", color:C.org,  bg:C.orgL},
+  {id:"confirmed",     label:"Order Confirmed",     icon:"✅", color:C.grn,  bg:C.grnL},
+  {id:"design",        label:"Design Phase",        icon:"✏️", color:C.pur,  bg:C.purL},
+  {id:"execution",     label:"Execution",           icon:"🔨", color:C.blu,  bg:C.bluL},
+];
+
+function getJourneyStage(j){
+  if(!j) return "qualified";
+  if(j.executionPhase?.started) return "execution";
+  if(j.designPhase?.started) return "design";
+  if(j.orderConfirmed?.done) return "confirmed";
+  if(j.quotationFollowUps?.length>0) return "negotiation";
+  if(j.quotation?.sent) return "quotation";
+  if(j.siteVisit?.done) return "sitevisit";
+  if(j.followUps?.length>0) return "followup";
+  return "qualified";
+}
+
+function getJourneyPct(j){
+  if(!j) return 0;
+  let done=0;
+  if(j.followUps?.length>0) done++;
+  if(j.siteVisit?.done) done++;
+  if(j.quotation?.sent) done++;
+  if(j.quotationFollowUps?.length>0) done++;
+  if(j.orderConfirmed?.done) done++;
+  if(j.token?.received) done++;
+  if(j.designPhase?.started) done++;
+  if(j.executionPhase?.started) done++;
+  return Math.round(done/8*100);
+}
+
+// ─── QUALIFIED LEADS PAGE ────────────────────────────────────────────────────
+
+function QualifiedLeadsPage({leads,updLead,showToast,openLeadDetail}){
+  const [selected,setSelected] = useState(null);
+  const [filterStage,setFilterStage] = useState("all");
+
+  const byStage = {
+    all: leads,
+    followup:    leads.filter(l=>getJourneyStage(l.projectJourney)==="followup"),
+    sitevisit:   leads.filter(l=>getJourneyStage(l.projectJourney)==="sitevisit"),
+    quotation:   leads.filter(l=>["quotation","negotiation"].includes(getJourneyStage(l.projectJourney))),
+    confirmed:   leads.filter(l=>["confirmed","design","execution"].includes(getJourneyStage(l.projectJourney))),
+  };
+  const shown = byStage[filterStage]||leads;
+
+  // overdue payments alert
+  const overduePayments = leads.filter(l=>{
+    const pj=l.projectJourney;
+    return pj?.payments?.some(p=>p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY);
+  });
+
+  const summaryStats=[
+    ["Total Qualified", leads.length, C.pur],
+    ["Needs Follow-up", byStage.followup.length, C.org],
+    ["Site Visit Stage", byStage.sitevisit.length, C.blu],
+    ["Quotation Sent", byStage.quotation.length, C.gldD],
+    ["Active Projects", byStage.confirmed.length, C.grn],
+  ];
+
+  return (
+    <div>
+      {overduePayments.length>0&&(
+        <div style={{background:C.redL,border:`1px solid ${C.red}44`,borderRadius:10,padding:"11px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:18}}>💳</span>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,fontSize:12,color:C.red}}>Payment follow-up needed for {overduePayments.length} project{overduePayments.length>1?"s":""}</div>
+            <div style={{fontSize:10,color:C.red,opacity:.8,marginTop:1}}>{overduePayments.map(l=>l.name).join(", ")}</div>
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:16}}>
+        {summaryStats.map(([label,val,color])=>(
+          <div key={label} style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:11,padding:"12px 14px"}}>
+            <div style={{fontSize:9,color:C.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:600}}>{label}</div>
+            <div style={{fontSize:24,fontWeight:300,fontFamily:"Georgia,serif",color,marginTop:3}}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:12}}>
+        <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.bdr}`,background:C.bg,borderRadius:"12px 12px 0 0",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <div style={{fontSize:12,fontWeight:600,flex:1}}>Qualified Leads · Project Tracker</div>
+          {[["all","All"],["followup","Follow-up"],["sitevisit","Site Visit"],["quotation","Quotation"],["confirmed","Active Projects"]].map(([id,lb])=>(
+            <button key={id} onClick={()=>setFilterStage(id)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${filterStage===id?C.deep:C.bdr}`,background:filterStage===id?C.deep:"transparent",color:filterStage===id?"#fff":C.mut,fontSize:11,cursor:"pointer",fontWeight:600}}>{lb}</button>
+          ))}
+        </div>
+        {shown.length===0
+          ?<Empty icon="✅" title="No leads in this stage" sub="Leads appear here once AI qualified"/>
+          :<table style={{width:"100%",borderCollapse:"collapse"}}>
+            <thead><tr>{["Lead","Score","Project","Budget","Stage","Progress","Payment",""].map(h=>(
+              <th key={h} style={{textAlign:"left",fontSize:10,fontWeight:600,color:C.mut,padding:"8px 13px",borderBottom:`1px solid ${C.bdr}`,textTransform:"uppercase",letterSpacing:.5}}>{h}</th>
+            ))}</tr></thead>
+            <tbody>{shown.map(l=>{
+              const j=l.projectJourney;
+              const stage=PIPELINE_STAGES.find(s=>s.id===getJourneyStage(j))||PIPELINE_STAGES[0];
+              const pct=getJourneyPct(j);
+              const totalAmt = j?.payments?.reduce((s,p)=>s+(parseFloat(p.scheduledAmt)||0),0)||0;
+              const recAmt   = j?.payments?.reduce((s,p)=>s+(parseFloat(p.receivedAmt)||0),0)||0;
+              const hasOverdue=j?.payments?.some(p=>p.status!=="paid"&&p.dueDate&&p.dueDate<=TODAY);
+              return (
+                <tr key={l.id} onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(c=>c.style.background=C.bg)} onMouseOut={e=>Array.from(e.currentTarget.cells).forEach(c=>c.style.background="")}>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`,cursor:"pointer"}} onClick={()=>setSelected(l.id)}>
+                    <div style={{fontSize:12,fontWeight:700}}>{l.name}</div>
+                    <div style={{fontSize:10,color:C.mut}}>{l.location||"—"} · {l.assignedTo||"—"}</div>
+                  </td>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}>{l.score!=null?<ScorePill score={l.score}/>:<span style={{color:C.mut,fontSize:11}}>—</span>}</td>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`,fontSize:11}}>{l.projectType}</td>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`,fontSize:11}}>{l.budget}</td>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}>
+                    <span style={{background:stage.bg,color:stage.color,fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:20,whiteSpace:"nowrap"}}>{stage.icon} {stage.label}</span>
+                  </td>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`,minWidth:120}}>
+                    <div style={{display:"flex",alignItems:"center",gap:7}}>
+                      <div style={{flex:1,height:5,background:C.bdr,borderRadius:10,overflow:"hidden"}}>
+                        <div style={{height:"100%",width:pct+"%",background:pct>=75?C.grn:pct>=40?C.gld:C.org,borderRadius:10}}/>
+                      </div>
+                      <span style={{fontSize:10,fontWeight:700,color:C.mut,minWidth:26}}>{pct}%</span>
+                    </div>
+                  </td>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}>
+                    {totalAmt>0?(
+                      <div>
+                        <div style={{fontSize:11,fontWeight:700,color:C.grn}}>₹{recAmt}L <span style={{color:C.mut,fontWeight:400}}>/ ₹{totalAmt}L</span></div>
+                        {hasOverdue&&<div style={{fontSize:9,color:C.red,fontWeight:700,marginTop:1}}>⚠️ Overdue</div>}
+                      </div>
+                    ):<span style={{fontSize:10,color:C.mut}}>—</span>}
+                  </td>
+                  <td style={{padding:"10px 13px",borderBottom:`1px solid ${C.bdr}`}}>
+                    <button style={B("gold",true)} onClick={()=>setSelected(l.id)}>Open Journey</button>
+                  </td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        }
+      </div>
+
+      {selected&&(()=>{
+        const lead=leads.find(l=>l.id===selected);
+        if(!lead) return null;
+        return <ProjectJourneyModal lead={lead} updLead={updLead} showToast={showToast} onClose={()=>setSelected(null)} openLeadDetail={openLeadDetail}/>;
+      })()}
+    </div>
+  );
+}
+
+// ─── PROJECT JOURNEY MODAL ────────────────────────────────────────────────────
+
+function ProjectJourneyModal({lead,updLead,showToast,onClose,openLeadDetail}){
+  const [pj,setPj] = useState(()=>lead.projectJourney||makeProjectJourney());
+  const [tab,setTab] = useState("journey");
+
+  function save(updates){
+    const next={...pj,...updates};
+    setPj(next);
+    updLead(lead.id,{projectJourney:next});
+  }
+  function savePj(next){
+    setPj(next);
+    updLead(lead.id,{projectJourney:next});
+  }
+  function toast(msg){showToast(msg);}
+
+  const stage=PIPELINE_STAGES.find(s=>s.id===getJourneyStage(pj))||PIPELINE_STAGES[0];
+  const pct=getJourneyPct(pj);
+
+  const tabSt=t=>({padding:"7px 14px",borderRadius:7,fontSize:11,fontWeight:600,cursor:"pointer",border:"none",background:tab===t?C.deep:"transparent",color:tab===t?"#fff":C.mut});
+
+  return (
+    <Overlay onClose={onClose}>
+      <ModalBox w={800}>
+        <MHead
+          title={<div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
+            {lead.name}
+            <span style={{background:stage.bg,color:stage.color,fontSize:10,fontWeight:700,padding:"2px 9px",borderRadius:20}}>{stage.icon} {stage.label}</span>
+            <span style={{background:pct>=75?C.grnL:pct>=40?C.yelL:C.orgL,color:pct>=75?C.grn:pct>=40?C.yel:C.org,fontSize:10,fontWeight:700,padding:"2px 9px",borderRadius:20}}>{pct}% complete</span>
+          </div>}
+          sub={`${lead.projectType} · ${lead.budget} · ${lead.phone} · ${lead.assignedTo||"—"}`}
+          onClose={onClose}
+          extra={<button style={B("ghost",true)} onClick={()=>{onClose();openLeadDetail(lead.id);}}>View Lead</button>}
+        />
+
+        {/* Progress bar */}
+        <div style={{padding:"10px 22px 0",background:C.bg,borderBottom:`1px solid ${C.bdr}`}}>
+          <div style={{display:"flex",gap:3,marginBottom:8}}>
+            {PIPELINE_STAGES.map((s,i)=>{
+              const cur=getJourneyStage(pj);
+              const idx=PIPELINE_STAGES.findIndex(x=>x.id===cur);
+              const done=i<idx;
+              const active=s.id===cur;
+              return (
+                <div key={s.id} style={{flex:1,textAlign:"center"}}>
+                  <div style={{height:4,background:done?C.grn:active?C.gld:C.bdr,borderRadius:10,marginBottom:4}}/>
+                  <div style={{fontSize:8,color:done?C.grn:active?C.gldD:C.mut,fontWeight:active||done?700:400,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.icon}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",gap:4,paddingBottom:10}}>
+            {[["journey","🗂 Journey"],["followups","📞 Follow-ups"],["payments","💳 Payments"]].map(([id,lb])=>(
+              <button key={id} style={tabSt(id)} onClick={()=>setTab(id)}>{lb}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{padding:"18px 22px",maxHeight:"calc(92vh - 200px)",overflowY:"auto"}}>
+
+          {/* ── JOURNEY TAB ── */}
+          {tab==="journey"&&<JourneyTab pj={pj} save={save} savePj={savePj} toast={toast}/>}
+
+          {/* ── FOLLOW-UPS TAB ── */}
+          {tab==="followups"&&<FollowUpsTab pj={pj} savePj={savePj} toast={toast}/>}
+
+          {/* ── PAYMENTS TAB ── */}
+          {tab==="payments"&&<PaymentsTab pj={pj} savePj={savePj} lead={lead} toast={toast}/>}
+
+        </div>
+      </ModalBox>
+    </Overlay>
+  );
+}
+
+// ─── JOURNEY TAB ─────────────────────────────────────────────────────────────
+
+function JourneyTab({pj,save,savePj,toast}){
+  function toggle(field,subfield,val){
+    save({[field]:{...pj[field],[subfield]:val}});
+  }
+
+  const Row=({done,onToggle,children,color})=>(
+    <div style={{display:"flex",gap:12,alignItems:"flex-start",padding:"14px 0",borderBottom:`1px solid ${C.bdr}`}}>
+      <div onClick={onToggle} style={{width:22,height:22,borderRadius:"50%",border:`2px solid ${done?(color||C.grn):C.bdr}`,background:done?(color||C.grn):"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>
+        {done&&<span style={{color:"#fff",fontSize:10,fontWeight:700}}>✓</span>}
+      </div>
+      <div style={{flex:1}}>{children}</div>
+    </div>
+  );
+
+  const Lbl=({children})=><div style={{fontSize:12,fontWeight:700,marginBottom:8,color:C.deep}}>{children}</div>;
+
+  return (
+    <div>
+      {/* 1. Site Visit */}
+      <Row done={pj.siteVisit?.done} onToggle={()=>save({siteVisit:{...pj.siteVisit,done:!pj.siteVisit?.done}})} color={C.blu}>
+        <Lbl>🏠 Site Visit</Lbl>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9}}>
+          <FG label="Scheduled Date"><input style={inp} type="date" value={pj.siteVisit?.scheduled||""} onChange={e=>toggle("siteVisit","scheduled",e.target.value)}/></FG>
+          <FG label="Visit Done?">
+            <select style={selSt} value={pj.siteVisit?.done?"yes":"no"} onChange={e=>save({siteVisit:{...pj.siteVisit,done:e.target.value==="yes"}})}>
+              <option value="no">Not yet</option><option value="yes">Done ✓</option>
+            </select>
+          </FG>
+          <FG label="Notes" style={{gridColumn:"1/-1"}}><input style={inp} value={pj.siteVisit?.notes||""} onChange={e=>toggle("siteVisit","notes",e.target.value)} placeholder="What was seen, client feedback..."/></FG>
+        </div>
+      </Row>
+
+      {/* 2. Quotation */}
+      <Row done={pj.quotation?.sent} onToggle={()=>save({quotation:{...pj.quotation,sent:!pj.quotation?.sent}})} color={C.gldD}>
+        <Lbl>📑 Quotation Sent</Lbl>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9}}>
+          <FG label="When Sent">
+            <select style={selSt} value={pj.quotation?.timing||"after_visit"} onChange={e=>toggle("quotation","timing",e.target.value)}>
+              <option value="before_visit">Before Site Visit</option>
+              <option value="after_visit">After Site Visit</option>
+            </select>
+          </FG>
+          <FG label="Date Sent"><input style={inp} type="date" value={pj.quotation?.sentDate||""} onChange={e=>toggle("quotation","sentDate",e.target.value)}/></FG>
+          <FG label="Sent via">
+            <select style={selSt} value={pj.quotation?.via||"WhatsApp"} onChange={e=>toggle("quotation","via",e.target.value)}>
+              <option>WhatsApp</option><option>Email</option><option>In Person</option><option>WhatsApp + Email</option>
+            </select>
+          </FG>
+          <FG label="Quote Amount (₹L)"><input style={inp} type="number" placeholder="e.g. 18" value={pj.quotation?.amount||""} onChange={e=>toggle("quotation","amount",e.target.value)}/></FG>
+          <FG label="Sent?">
+            <select style={selSt} value={pj.quotation?.sent?"yes":"no"} onChange={e=>save({quotation:{...pj.quotation,sent:e.target.value==="yes"}})}>
+              <option value="no">Not yet</option><option value="yes">Sent ✓</option>
+            </select>
+          </FG>
+          <FG label="Notes"><input style={inp} value={pj.quotation?.notes||""} onChange={e=>toggle("quotation","notes",e.target.value)} placeholder="Any special inclusions..."/></FG>
+        </div>
+        {pj.quotation?.sent&&(
+          <div style={{marginTop:10,padding:"9px 12px",background:C.gldL,borderRadius:8,fontSize:11,color:C.gldD,fontWeight:600}}>
+            💡 Add post-quotation follow-ups in the Follow-ups tab
+          </div>
+        )}
+      </Row>
+
+      {/* 3. Order Confirmed */}
+      <Row done={pj.orderConfirmed?.done} onToggle={()=>save({orderConfirmed:{...pj.orderConfirmed,done:!pj.orderConfirmed?.done}})} color={C.grn}>
+        <Lbl>✅ Order Confirmed</Lbl>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9}}>
+          <FG label="Confirmation Date"><input style={inp} type="date" value={pj.orderConfirmed?.date||""} onChange={e=>toggle("orderConfirmed","date",e.target.value)}/></FG>
+          <FG label="Token Amount (₹L)">
+            <input style={inp} type="number" placeholder="e.g. 1.5" value={pj.token?.amount||""}
+              onChange={e=>{
+                const next={...pj,token:{...pj.token,amount:e.target.value}};
+                savePj(next);
+              }}
+            />
+          </FG>
+          <FG label="Token Received?">
+            <select style={selSt} value={pj.token?.received?"yes":"no"} onChange={e=>{
+              const next={...pj,token:{...pj.token,received:e.target.value==="yes",date:pj.token?.date||new Date().toISOString().split("T")[0]}};
+              savePj(next);
+            }}>
+              <option value="no">Not yet</option><option value="yes">Received ✓</option>
+            </select>
+          </FG>
+          <FG label="Token Date"><input style={inp} type="date" value={pj.token?.date||""} onChange={e=>toggle("token","date",e.target.value)}/></FG>
+          <FG label="Notes" style={{gridColumn:"2/-1"}}><input style={inp} value={pj.orderConfirmed?.notes||""} onChange={e=>toggle("orderConfirmed","notes",e.target.value)} placeholder="Agreement signed, special terms..."/></FG>
+        </div>
+      </Row>
+
+      {/* 4. Design Phase */}
+      <Row done={pj.designPhase?.started} onToggle={()=>save({designPhase:{...pj.designPhase,started:!pj.designPhase?.started}})} color={C.pur}>
+        <Lbl>✏️ Design Phase</Lbl>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9}}>
+          <FG label="Start Date"><input style={inp} type="date" value={pj.designPhase?.startDate||""} onChange={e=>toggle("designPhase","startDate",e.target.value)}/></FG>
+          <FG label="Target End Date"><input style={inp} type="date" value={pj.designPhase?.endDate||""} onChange={e=>toggle("designPhase","endDate",e.target.value)}/></FG>
+          <FG label="Status">
+            <select style={selSt} value={pj.designPhase?.status||"not_started"} onChange={e=>toggle("designPhase","status",e.target.value)}>
+              <option value="not_started">Not started</option>
+              <option value="in_progress">In progress</option>
+              <option value="review">Client review</option>
+              <option value="approved">Approved ✓</option>
+            </select>
+          </FG>
+          <FG label="Notes" style={{gridColumn:"1/-1"}}><textarea style={{...ta,minHeight:52}} value={pj.designPhase?.notes||""} onChange={e=>toggle("designPhase","notes",e.target.value)} placeholder="Design scope, revisions, approvals..."/></FG>
+        </div>
+        {pj.designPhase?.startDate&&pj.designPhase?.endDate&&(()=>{
+          const days=Math.round((new Date(pj.designPhase.endDate)-new Date(pj.designPhase.startDate))/(1000*60*60*24));
+          const today=new Date();
+          const end=new Date(pj.designPhase.endDate);
+          const overdue=today>end&&pj.designPhase?.status!=="approved";
+          return <div style={{fontSize:10,color:overdue?C.red:C.grn,fontWeight:600,marginTop:6}}>{overdue?"⚠️ Design overdue":"📅 "+days+" day design timeline"}</div>;
+        })()}
+      </Row>
+
+      {/* 5. Execution Phase */}
+      <Row done={pj.executionPhase?.started} onToggle={()=>save({executionPhase:{...pj.executionPhase,started:!pj.executionPhase?.started}})} color={C.blu}>
+        <Lbl>🔨 Execution Phase</Lbl>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9}}>
+          <FG label="Start Date"><input style={inp} type="date" value={pj.executionPhase?.startDate||""} onChange={e=>toggle("executionPhase","startDate",e.target.value)}/></FG>
+          <FG label="Target End Date"><input style={inp} type="date" value={pj.executionPhase?.endDate||""} onChange={e=>toggle("executionPhase","endDate",e.target.value)}/></FG>
+          <FG label="Status">
+            <select style={selSt} value={pj.executionPhase?.status||"not_started"} onChange={e=>toggle("executionPhase","status",e.target.value)}>
+              <option value="not_started">Not started</option>
+              <option value="in_progress">In progress</option>
+              <option value="lamination">Lamination stage</option>
+              <option value="finishing">Finishing</option>
+              <option value="handover">Handover ✓</option>
+            </select>
+          </FG>
+          <FG label="Notes" style={{gridColumn:"1/-1"}}><textarea style={{...ta,minHeight:52}} value={pj.executionPhase?.notes||""} onChange={e=>toggle("executionPhase","notes",e.target.value)} placeholder="On-site progress, materials, issues..."/></FG>
+        </div>
+        {pj.executionPhase?.startDate&&pj.executionPhase?.endDate&&(()=>{
+          const total=Math.round((new Date(pj.executionPhase.endDate)-new Date(pj.executionPhase.startDate))/(1000*60*60*24));
+          const elapsed=Math.round((new Date()-new Date(pj.executionPhase.startDate))/(1000*60*60*24));
+          const pctDone=Math.min(100,Math.max(0,Math.round(elapsed/total*100)));
+          const overdue=new Date()>new Date(pj.executionPhase.endDate)&&pj.executionPhase?.status!=="handover";
+          return (
+            <div style={{marginTop:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:overdue?C.red:C.mut,marginBottom:4}}>
+                <span>{overdue?"⚠️ Execution overdue":"📅 "+total+" day execution timeline"}</span>
+                <span style={{fontWeight:700,color:overdue?C.red:C.grn}}>{pctDone}% time elapsed</span>
+              </div>
+              <div style={{height:5,background:C.bdr,borderRadius:10,overflow:"hidden"}}>
+                <div style={{height:"100%",width:pctDone+"%",background:overdue?C.red:C.grn,borderRadius:10}}/>
+              </div>
+            </div>
+          );
+        })()}
+      </Row>
+    </div>
+  );
+}
+
+// ─── FOLLOW-UPS TAB ───────────────────────────────────────────────────────────
+
+function FollowUpsTab({pj,savePj,toast}){
+  const [newFu,setNewFu] = useState({date:"",method:"WhatsApp",notes:"",outcome:"",by:"",type:"pre_quotation"});
+  const [addingType,setAddingType] = useState(null); // "pre"|"post"
+
+  function addFollowUp(type){
+    if(!newFu.date){alert("Pick a date");return;}
+    const fu={...newFu,type,addedAt:new Date().toLocaleString("en-IN"),id:Date.now()};
+    const key = type==="post_quotation"?"quotationFollowUps":"followUps";
+    const next={...pj,[key]:[...(pj[key]||[]),fu]};
+    savePj(next);
+    setNewFu({date:"",method:"WhatsApp",notes:"",outcome:"",by:"",type:"pre_quotation"});
+    setAddingType(null);
+    toast("Follow-up logged");
+  }
+
+  function removeFollowUp(key,id){
+    const next={...pj,[key]:(pj[key]||[]).filter(f=>f.id!==id)};
+    savePj(next);
+  }
+
+  const outcomeColor=o=>o==="Positive - moving ahead"?C.grn:o==="Not responding"?C.red:C.yel;
+
+  const FuList=({items,keyName,title,color})=>(
+    <div style={{marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{fontSize:12,fontWeight:700,color}}>{title} <span style={{fontSize:10,color:C.mut,fontWeight:400}}>({items.length})</span></div>
+        <button style={B("outline",true)} onClick={()=>setAddingType(addingType===keyName?null:keyName)}>+ Add</button>
+      </div>
+
+      {addingType===keyName&&(
+        <div style={{background:C.bg,border:`1px solid ${color}44`,borderRadius:10,padding:14,marginBottom:12,animation:"fadeIn .2s ease"}}>
+          <div style={{fontSize:11,fontWeight:700,color,marginBottom:10}}>Log follow-up</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9,marginBottom:10}}>
+            <FG label="Date"><input style={inp} type="date" value={newFu.date} onChange={e=>setNewFu(p=>({...p,date:e.target.value}))}/></FG>
+            <FG label="Method">
+              <select style={selSt} value={newFu.method} onChange={e=>setNewFu(p=>({...p,method:e.target.value}))}>
+                <option>WhatsApp</option><option>Phone Call</option><option>In Person</option><option>Email</option>
+              </select>
+            </FG>
+            <FG label="Done by"><input style={inp} value={newFu.by} onChange={e=>setNewFu(p=>({...p,by:e.target.value}))} placeholder="Team member name"/></FG>
+            <FG label="Outcome">
+              <select style={selSt} value={newFu.outcome} onChange={e=>setNewFu(p=>({...p,outcome:e.target.value}))}>
+                <option value="">Select outcome...</option>
+                <option>Positive - moving ahead</option>
+                <option>Needs more time</option>
+                <option>Requested more info</option>
+                <option>Price negotiation</option>
+                <option>Not responding</option>
+                <option>Meeting scheduled</option>
+              </select>
+            </FG>
+            <FG label="Notes" style={{gridColumn:"2/-1"}}><input style={inp} value={newFu.notes} onChange={e=>setNewFu(p=>({...p,notes:e.target.value}))} placeholder="What was discussed..."/></FG>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button style={B("gold")} onClick={()=>addFollowUp(keyName==="followUps"?"pre_quotation":"post_quotation")}>Save Follow-up</button>
+            <button style={B("ghost")} onClick={()=>setAddingType(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {items.length===0
+        ?<div style={{padding:"14px",textAlign:"center",fontSize:11,color:C.mut,border:`1px dashed ${C.bdr}`,borderRadius:9}}>No follow-ups yet. Click + Add to log one.</div>
+        :<div style={{background:C.sur,border:`1px solid ${C.bdr}`,borderRadius:9}}>
+          {items.map((fu,i)=>(
+            <div key={fu.id||i} style={{display:"flex",gap:10,padding:"10px 14px",borderBottom:i<items.length-1?`1px solid ${C.bdr}`:"none",alignItems:"flex-start"}}>
+              <div style={{width:7,height:7,borderRadius:"50%",background:fu.outcome?outcomeColor(fu.outcome):C.org,marginTop:5,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:2}}>
+                  <span style={{fontSize:12,fontWeight:700}}>{fu.date}</span>
+                  <span style={{fontSize:10,background:C.bg,border:`1px solid ${C.bdr}`,padding:"1px 7px",borderRadius:20}}>{fu.method}</span>
+                  {fu.by&&<span style={{fontSize:10,color:C.mut}}>by {fu.by}</span>}
+                </div>
+                {fu.outcome&&<div style={{fontSize:10,fontWeight:600,color:outcomeColor(fu.outcome),marginBottom:2}}>{fu.outcome}</div>}
+                {fu.notes&&<div style={{fontSize:11,color:C.mut}}>{fu.notes}</div>}
+              </div>
+              <button style={B("ghost",true)} onClick={()=>removeFollowUp(keyName,fu.id)}>✕</button>
+            </div>
+          ))}
+        </div>
+      }
+    </div>
+  );
+
+  return (
+    <div>
+      <FuList items={pj.followUps||[]} keyName="followUps" title="Pre-Quotation Follow-ups" color={C.org}/>
+      <FuList items={pj.quotationFollowUps||[]} keyName="quotationFollowUps" title="Post-Quotation Follow-ups" color={C.pur}/>
+    </div>
+  );
+}
+
+// ─── PAYMENTS TAB ─────────────────────────────────────────────────────────────
+
+function PaymentsTab({pj,savePj,lead,toast}){
+  const payments = pj.payments||makeProjectJourney().payments;
+  const quoteAmt = parseFloat(pj.quotation?.amount)||0;
+
+  function updatePayment(id,field,val){
+    const pays=payments.map(p=>{
+      if(p.id!==id) return p;
+      const updated={...p,[field]:val};
+      if(field==="receivedAmt"){
+        const rec=parseFloat(val)||0;
+        const sched=parseFloat(updated.scheduledAmt)||0;
+        updated.status=rec>=sched&&sched>0?"paid":rec>0?"partial":"pending";
+        if(rec>0&&!updated.receivedDate) updated.receivedDate=new Date().toISOString().split("T")[0];
+      }
+      return updated;
+    });
+    savePj({...pj,payments:pays});
+  }
+
+  function autoFillAmounts(){
+    if(!quoteAmt){alert("Set quote amount in Journey tab first");return;}
+    const pays=payments.map(p=>({...p,scheduledAmt:(quoteAmt*p.pct/100).toFixed(2)}));
+    savePj({...pj,payments:pays});
+    toast("Amounts auto-filled from ₹"+quoteAmt+"L quote");
+  }
+
+  const totalSched=payments.reduce((s,p)=>s+(parseFloat(p.scheduledAmt)||0),0);
+  const totalRec=payments.reduce((s,p)=>s+(parseFloat(p.receivedAmt)||0),0);
+  const totalPending=totalSched-totalRec;
+  const overallPct=totalSched>0?Math.round(totalRec/totalSched*100):0;
+
+  const statusBg={paid:C.grnL,partial:C.yelL,pending:C.orgL};
+  const statusC={paid:C.grn,partial:C.yel,pending:C.org};
+
+  return (
+    <div>
+      {/* Summary */}
+      <div style={{background:C.bg,border:`1px solid ${C.bdr}`,borderRadius:11,padding:"14px 18px",marginBottom:18}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+          <div>
+            <div style={{fontSize:11,color:C.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Payment Summary</div>
+            <div style={{display:"flex",gap:20}}>
+              <div><div style={{fontSize:9,color:C.mut,fontWeight:600,letterSpacing:.5}}>TOTAL PROJECT</div><div style={{fontSize:20,fontFamily:"Georgia,serif",fontWeight:300,color:C.deep}}>₹{totalSched.toFixed(1)}L</div></div>
+              <div><div style={{fontSize:9,color:C.mut,fontWeight:600,letterSpacing:.5}}>RECEIVED</div><div style={{fontSize:20,fontFamily:"Georgia,serif",fontWeight:300,color:C.grn}}>₹{totalRec.toFixed(1)}L</div></div>
+              <div><div style={{fontSize:9,color:C.mut,fontWeight:600,letterSpacing:.5}}>PENDING</div><div style={{fontSize:20,fontFamily:"Georgia,serif",fontWeight:300,color:totalPending>0?C.red:C.grn}}>₹{totalPending.toFixed(1)}L</div></div>
+            </div>
+          </div>
+          {quoteAmt>0&&<button style={B("outline",true)} onClick={autoFillAmounts}>Auto-fill from ₹{quoteAmt}L quote</button>}
+          {!quoteAmt&&<div style={{fontSize:10,color:C.mut,maxWidth:160,textAlign:"right",lineHeight:1.5}}>Set quote amount in Journey tab to auto-fill</div>}
+        </div>
+        <div style={{height:8,background:C.bdr,borderRadius:10,overflow:"hidden",marginBottom:5}}>
+          <div style={{height:"100%",width:overallPct+"%",background:`linear-gradient(90deg,${C.gld},${C.grn})`,borderRadius:10,transition:"width .4s"}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:C.mut,fontWeight:600}}>
+          <span>0%</span><span style={{color:overallPct>=100?C.grn:C.gldD}}>{overallPct}% collected</span><span>100%</span>
+        </div>
+      </div>
+
+      {/* Payment milestones */}
+      <div style={{fontSize:11,fontWeight:700,color:C.mut,textTransform:"uppercase",letterSpacing:.6,marginBottom:12}}>Payment Milestones</div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {payments.map((pay,i)=>{
+          const isOverdue=pay.status!=="paid"&&pay.dueDate&&pay.dueDate<=TODAY;
+          const pct=pay.scheduledAmt?Math.min(100,Math.round((parseFloat(pay.receivedAmt)||0)/parseFloat(pay.scheduledAmt)*100)):0;
+          return (
+            <div key={pay.id} style={{background:C.sur,border:`2px solid ${isOverdue?C.red:pay.status==="paid"?C.grn:C.bdr}`,borderRadius:11,padding:"14px 16px",position:"relative"}}>
+              {isOverdue&&<div style={{position:"absolute",top:10,right:14,fontSize:10,color:C.red,fontWeight:700}}>⚠️ OVERDUE</div>}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{display:"flex",alignItems:"center",gap:9}}>
+                  <div style={{width:28,height:28,borderRadius:"50%",background:pay.status==="paid"?C.grnL:C.bg,border:`2px solid ${pay.status==="paid"?C.grn:C.bdr}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:pay.status==="paid"?C.grn:C.mut,flexShrink:0}}>{i+1}</div>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700}}>{pay.label}</div>
+                    <div style={{fontSize:10,color:C.mut,marginTop:1}}>{pay.pct}% of project value</div>
+                  </div>
+                </div>
+                <span style={{background:statusBg[pay.status]||C.orgL,color:statusC[pay.status]||C.org,fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:20,textTransform:"capitalize"}}>{pay.status==="paid"?"✓ Paid":pay.status==="partial"?"Partial":isOverdue?"Overdue":"Pending"}</span>
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:9,marginBottom:10}}>
+                <FG label="Scheduled (₹L)"><input style={inp} type="number" value={pay.scheduledAmt||""} onChange={e=>updatePayment(pay.id,"scheduledAmt",e.target.value)} placeholder="Auto or manual"/></FG>
+                <FG label="Received (₹L)"><input style={{...inp,borderColor:parseFloat(pay.receivedAmt)>0?C.grn:C.bdr}} type="number" value={pay.receivedAmt||""} onChange={e=>updatePayment(pay.id,"receivedAmt",e.target.value)} placeholder="Enter on receipt"/></FG>
+                <FG label="Due Date"><input style={{...inp,borderColor:isOverdue?C.red:C.bdr}} type="date" value={pay.dueDate||""} onChange={e=>updatePayment(pay.id,"dueDate",e.target.value)}/></FG>
+                <FG label="Received Date"><input style={inp} type="date" value={pay.receivedDate||""} onChange={e=>updatePayment(pay.id,"receivedDate",e.target.value)}/></FG>
+              </div>
+
+              {pay.scheduledAmt&&(
+                <div>
+                  <div style={{height:5,background:C.bdr,borderRadius:10,overflow:"hidden",marginBottom:4}}>
+                    <div style={{height:"100%",width:pct+"%",background:pay.status==="paid"?C.grn:C.gld,borderRadius:10,transition:"width .3s"}}/>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:C.mut}}>
+                    <span>₹{(parseFloat(pay.receivedAmt)||0).toFixed(1)}L received</span>
+                    <span style={{fontWeight:700,color:pay.status==="paid"?C.grn:C.mut}}>{pct}%</span>
+                    <span>₹{(parseFloat(pay.scheduledAmt)-parseFloat(pay.receivedAmt||0)).toFixed(1)}L pending</span>
+                  </div>
+                </div>
+              )}
+
+              {isOverdue&&(
+                <div style={{marginTop:10,padding:"8px 12px",background:C.redL,borderRadius:7,fontSize:11,color:C.red,fontWeight:600}}>
+                  🔴 Payment overdue since {pay.dueDate} — send WhatsApp reminder to client
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Timeline view */}
+      <div style={{marginTop:20,borderTop:`1px solid ${C.bdr}`,paddingTop:16}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.mut,textTransform:"uppercase",letterSpacing:.6,marginBottom:12}}>Payment Timeline</div>
+        <div style={{display:"flex",gap:0,position:"relative"}}>
+          <div style={{position:"absolute",top:14,left:14,right:14,height:2,background:C.bdr,zIndex:0}}/>
+          {payments.map((pay,i)=>(
+            <div key={pay.id} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",position:"relative",zIndex:1}}>
+              <div style={{width:28,height:28,borderRadius:"50%",background:pay.status==="paid"?C.grn:pay.status==="partial"?C.gld:C.bg,border:`2px solid ${pay.status==="paid"?C.grn:pay.status==="partial"?C.gld:C.bdr}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:pay.status==="paid"?"#fff":pay.status==="partial"?C.gldD:C.mut,marginBottom:8}}>
+                {pay.status==="paid"?"✓":pay.pct+"%"}
+              </div>
+              <div style={{fontSize:9,fontWeight:700,textAlign:"center",color:C.deep,maxWidth:80}}>{pay.label}</div>
+              <div style={{fontSize:9,color:C.mut,marginTop:2}}>{pay.scheduledAmt?"₹"+pay.scheduledAmt+"L":"—"}</div>
+              {pay.dueDate&&<div style={{fontSize:8,color:pay.dueDate<=TODAY&&pay.status!=="paid"?C.red:C.mut,marginTop:2}}>{pay.dueDate}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
